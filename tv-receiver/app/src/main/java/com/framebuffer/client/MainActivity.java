@@ -23,6 +23,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private FrameReceiver frameReceiver;
     private boolean listening = false;
     private Thread serverThread;
+    private android.hardware.display.DisplayManager displayManager;
+    private android.hardware.display.DisplayManager.DisplayListener displayListener;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +37,29 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         statusText = findViewById(R.id.statusText);  // We'll need to add this
 
         surfaceView.getHolder().addCallback(this);
+
+        // Set up display manager to detect TV/external display
+        displayManager = (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+        displayListener = new android.hardware.display.DisplayManager.DisplayListener() {
+            @Override
+            public void onDisplayAdded(int displayId) {
+                updateDisplayVisibility();
+            }
+
+            @Override
+            public void onDisplayRemoved(int displayId) {
+                updateDisplayVisibility();
+            }
+
+            @Override
+            public void onDisplayChanged(int displayId) {
+                updateDisplayVisibility();
+            }
+        };
+        displayManager.registerDisplayListener(displayListener, new Handler(Looper.getMainLooper()));
+
+        // Initial display visibility check
+        updateDisplayVisibility();
 
         // Set default port
         listenPortEdit.setText("8888");
@@ -134,30 +159,23 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     }
                 });
 
-                // Query display capabilities
-                android.view.Display display = getWindowManager().getDefaultDisplay();
+                // Query display capabilities - use TV if connected, otherwise phone display
+                android.view.Display targetDisplay = getTargetDisplay();
                 android.graphics.Point size = new android.graphics.Point();
-                display.getRealSize(size);
+                targetDisplay.getRealSize(size);
 
                 // Get display name
-                String displayName = "Unknown Display";
-                try {
-                    android.hardware.display.DisplayManager dm =
-                        (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
-                    android.view.Display[] displays = dm.getDisplays();
-                    if (displays.length > 0) {
-                        android.view.Display d = displays[0];
-                        displayName = d.getName();
-                        if (displayName == null || displayName.isEmpty()) {
-                            displayName = "Android Display";
-                        }
+                String displayName = targetDisplay.getName();
+                if (displayName == null || displayName.isEmpty()) {
+                    if (isTvConnected()) {
+                        displayName = "TV Display";
+                    } else {
+                        displayName = "Phone Display";
                     }
-                } catch (Exception e) {
-                    e.printStackTrace();
                 }
 
                 // Get refresh rate
-                float refreshRate = display.getRefreshRate();
+                float refreshRate = targetDisplay.getRefreshRate();
                 int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
 
                 // Create display modes (for now, just the current resolution)
@@ -170,8 +188,12 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // Send HELLO with display name and modes
                 Protocol.sendHello(clientSocket.getOutputStream(), displayName, modes);
 
-                // Start frame receiver
-                frameReceiver = new FrameReceiver(clientSocket, surfaceView.getHolder(), MainActivity.this);
+                // Start frame receiver - use appropriate SurfaceHolder
+                // If TV is connected, we need to get the TV's SurfaceView holder
+                // For now, we'll use the phone's SurfaceView (it will be hidden if TV is connected)
+                // TODO: In the future, could create a Presentation for TV display
+                SurfaceHolder targetHolder = surfaceView.getHolder();
+                frameReceiver = new FrameReceiver(clientSocket, targetHolder, MainActivity.this);
                 frameReceiver.setConfigCallback(config -> {
                     // Handle config changes on main thread
                     new Handler(Looper.getMainLooper()).post(() -> {
@@ -326,7 +348,85 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (displayManager != null && displayListener != null) {
+            displayManager.unregisterDisplayListener(displayListener);
+        }
         stopListening();
+    }
+
+    private boolean isTvConnected() {
+        if (displayManager == null) {
+            return false;
+        }
+        android.view.Display defaultDisplay = getWindowManager().getDefaultDisplay();
+        int defaultDisplayId = defaultDisplay.getDisplayId();
+
+        android.view.Display[] displays = displayManager.getDisplays();
+
+        // Check if there are any displays other than the default (phone) display
+        for (android.view.Display display : displays) {
+            if (display.getDisplayId() != defaultDisplayId) {
+                // Check if it's a presentation/external display
+                if ((display.getFlags() & android.view.Display.FLAG_PRESENTATION) != 0) {
+                    return true;
+                }
+                // Also check if it's HDMI or other external connection
+                // (HDMI displays typically have different characteristics)
+                android.graphics.Point size = new android.graphics.Point();
+                display.getRealSize(size);
+                // If it's a different size or has presentation flag, it's likely external
+                android.graphics.Point defaultSize = new android.graphics.Point();
+                defaultDisplay.getRealSize(defaultSize);
+                if (!size.equals(defaultSize)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private android.view.Display getTargetDisplay() {
+        if (displayManager == null) {
+            return getWindowManager().getDefaultDisplay();
+        }
+
+        android.view.Display defaultDisplay = getWindowManager().getDefaultDisplay();
+        int defaultDisplayId = defaultDisplay.getDisplayId();
+
+        android.view.Display[] displays = displayManager.getDisplays();
+
+        // First, try to find an external/TV display
+        for (android.view.Display display : displays) {
+            if (display.getDisplayId() != defaultDisplayId) {
+                // Check if it's a presentation/external display
+                if ((display.getFlags() & android.view.Display.FLAG_PRESENTATION) != 0) {
+                    return display;
+                }
+                // Also check if it's HDMI or other external connection
+                android.graphics.Point size = new android.graphics.Point();
+                display.getRealSize(size);
+                android.graphics.Point defaultSize = new android.graphics.Point();
+                defaultDisplay.getRealSize(defaultSize);
+                if (!size.equals(defaultSize)) {
+                    return display;
+                }
+            }
+        }
+
+        // If no external display, use the default (phone) display
+        return defaultDisplay;
+    }
+
+    private void updateDisplayVisibility() {
+        boolean tvConnected = isTvConnected();
+
+        // If TV is connected, hide the SurfaceView on phone
+        // If no TV, show the SurfaceView on phone
+        if (tvConnected) {
+            surfaceView.setVisibility(android.view.View.GONE);
+        } else {
+            surfaceView.setVisibility(android.view.View.VISIBLE);
+        }
     }
 }
 
