@@ -23,6 +23,7 @@ public class FrameReceiver extends Thread {
     private boolean running = false;
     private ConfigCallback configCallback;
     private android.content.Context context;
+    private AudioReceiver audioReceiver;
 
     // Current configuration state
     private int currentWidth = 0;
@@ -42,6 +43,10 @@ public class FrameReceiver extends Thread {
 
     public void stopReceiving() {
         running = false;
+        if (audioReceiver != null) {
+            audioReceiver.stop();
+            audioReceiver = null;
+        }
         interrupt();
     }
 
@@ -56,11 +61,11 @@ public class FrameReceiver extends Thread {
                 Protocol.MessageHeader header = Protocol.receiveHeader(in);
 
                 if (header.type == Protocol.MSG_FRAME) {
-                    // Read frame message
-                    byte[] frameData = new byte[24]; // FrameMessage size
+                    // Read frame message (now 32 bytes with timestamp)
+                    byte[] frameData = new byte[32]; // FrameMessage size
                     int read = 0;
-                    while (read < 24) {
-                        int n = in.read(frameData, read, 24 - read);
+                    while (read < 32) {
+                        int n = in.read(frameData, read, 32 - read);
                         if (n < 0) break;
                         read += n;
                     }
@@ -119,6 +124,41 @@ public class FrameReceiver extends Thread {
                     // Notify callback
                     if (configCallback != null) {
                         configCallback.onConfigChanged(config);
+                    }
+
+                } else if (header.type == Protocol.MSG_AUDIO) {
+                    // Read audio message
+                    byte[] audioData = new byte[20]; // AudioMessage size
+                    int read = 0;
+                    while (read < 20) {
+                        int n = in.read(audioData, read, 20 - read);
+                        if (n < 0) break;
+                        read += n;
+                    }
+
+                    Protocol.AudioMessage audio = Protocol.parseAudioMessage(audioData);
+
+                    // Initialize audio receiver if needed
+                    if (audioReceiver == null && audio.sampleRate > 0 && audio.channels > 0) {
+                        audioReceiver = new AudioReceiver(audio.sampleRate, audio.channels, audio.format);
+                        audioReceiver.start();
+                    }
+
+                    // Read audio data and forward to AudioReceiver
+                    if (audio.dataSize > 0 && audioReceiver != null) {
+                        byte[] audioBytes = new byte[audio.dataSize];
+                        int audioRead = 0;
+                        while (audioRead < audio.dataSize) {
+                            int n = in.read(audioBytes, audioRead, audio.dataSize - audioRead);
+                            if (n < 0) break;
+                            audioRead += n;
+                        }
+                        if (audioRead == audio.dataSize) {
+                            audioReceiver.addAudioData(audioBytes);
+                        }
+                    } else if (audio.dataSize > 0) {
+                        // Skip if audio receiver not initialized
+                        in.skip(audio.dataSize);
                     }
 
                 } else if (header.type == Protocol.MSG_PING) {

@@ -43,6 +43,7 @@ typedef struct __attribute__((packed)) {
 
 // FRAME message
 typedef struct __attribute__((packed)) {
+    uint64_t timestamp_us;  // Microseconds since epoch (monotonic clock) for sync
     uint32_t output_id;
     uint32_t width;
     uint32_t height;
@@ -59,6 +60,16 @@ typedef struct __attribute__((packed)) {
     uint32_t height;
     uint32_t refresh_rate;
 } config_message_t;
+
+// AUDIO message
+typedef struct __attribute__((packed)) {
+    uint64_t timestamp_us;  // Microseconds since epoch (monotonic clock)
+    uint32_t sample_rate;   // e.g., 48000
+    uint16_t channels;      // e.g., 2 (stereo)
+    uint16_t format;        // 0=PCM_S16LE, 1=PCM_S32LE, etc.
+    uint32_t data_size;     // Size of audio data in bytes
+    // Followed by audio data (PCM samples)
+} audio_message_t;
 
 // INPUT message (from TV receiver)
 typedef struct __attribute__((packed)) {

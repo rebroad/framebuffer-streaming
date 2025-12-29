@@ -2,6 +2,7 @@
 #include "x11_output.h"
 #include "drm_fb.h"
 #include "protocol.h"
+#include "audio_capture.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,7 @@ struct x11_streamer {
     tv_connection_t *tv_conn;  // Single TV connection
     pthread_mutex_t tv_mutex;
     pthread_t tv_thread;
+    audio_capture_t *audio_capture;
 };
 
 static void *tv_receiver_thread(void *arg)
@@ -136,6 +138,15 @@ static void *tv_receiver_thread(void *arg)
 
         free(payload);
         payload = NULL;
+
+        // Start audio capture after connection is established
+        if (streamer->audio_capture) {
+            if (audio_capture_start(streamer->audio_capture) == 0) {
+                printf("Audio capture started\n");
+            } else {
+                fprintf(stderr, "Failed to start audio capture\n");
+            }
+        }
     } else {
         if (payload)
             free(payload);
@@ -200,6 +211,7 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         return;
 
     frame_message_t frame = {
+        .timestamp_us = audio_get_timestamp_us(),
         .output_id = output->output_id,
         .width = fb->width,
         .height = fb->height,
@@ -291,6 +303,45 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
     drm_fb_close(fb);
 }
 
+static void streamer_capture_and_send_audio(x11_streamer_t *streamer)
+{
+    if (!streamer || !streamer->audio_capture || streamer->tv_fd < 0)
+        return;
+
+    void *audio_data = NULL;
+    uint32_t audio_size = 0;
+
+    int ret = audio_capture_read(streamer->audio_capture, &audio_data, &audio_size);
+    if (ret > 0 && audio_data && audio_size > 0) {
+        // Create audio message
+        audio_message_t audio_msg = {
+            .timestamp_us = audio_get_timestamp_us(),
+            .sample_rate = 48000,
+            .channels = 2,
+            .format = AUDIO_FORMAT_PCM_S16LE,
+            .data_size = audio_size
+        };
+
+        // Send audio header
+        if (protocol_send_message(streamer->tv_fd, MSG_AUDIO, &audio_msg, sizeof(audio_msg)) < 0) {
+            printf("Failed to send audio header\n");
+            free(audio_data);
+            return;
+        }
+
+        // Send audio data
+        if (send(streamer->tv_fd, audio_data, audio_size, MSG_NOSIGNAL) != (ssize_t)audio_size) {
+            printf("Failed to send audio data\n");
+        }
+
+        free(audio_data);
+    } else if (ret < 0) {
+        // Error reading audio
+        if (audio_data)
+            free(audio_data);
+    }
+}
+
 static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
 {
     if (!streamer || !streamer->x11_ctx || !streamer->x11_ctx->outputs || streamer->tv_fd < 0)
@@ -373,6 +424,12 @@ x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
     }
     streamer->tv_conn->streamer = streamer;
 
+    // Create audio capture (48kHz, stereo, 16-bit PCM for low latency)
+    streamer->audio_capture = audio_capture_create(48000, 2, AUDIO_FORMAT_PCM_S16LE);
+    if (!streamer->audio_capture) {
+        fprintf(stderr, "Warning: Failed to create audio capture\n");
+    }
+
     return streamer;
 }
 
@@ -399,6 +456,9 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
 
     if (streamer->tv_conn)
         free(streamer->tv_conn);
+
+    if (streamer->audio_capture)
+        audio_capture_destroy(streamer->audio_capture);
 
     if (streamer->x11_ctx)
         x11_context_destroy(streamer->x11_ctx);
@@ -502,6 +562,9 @@ int x11_streamer_run(x11_streamer_t *streamer)
             streamer_capture_and_send_frames(streamer);
             frame_counter = 0;
         }
+
+        // Capture and send audio (low latency, frequent reads)
+        streamer_capture_and_send_audio(streamer);
 
         // Refresh outputs occasionally (every 60 seconds)
         refresh_counter++;

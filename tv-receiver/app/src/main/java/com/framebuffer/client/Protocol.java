@@ -23,12 +23,21 @@ public class Protocol {
     }
 
     public static class FrameMessage {
+        public long timestampUs;  // Timestamp for synchronization
         public int outputId;
         public int width;
         public int height;
         public int format;
         public int pitch;
         public int size;
+    }
+
+    public static class AudioMessage {
+        public long timestampUs;  // Timestamp for synchronization
+        public int sampleRate;
+        public int channels;
+        public int format;
+        public int dataSize;
     }
 
     public static class DisplayMode {
@@ -109,6 +118,7 @@ public class Protocol {
     public static FrameMessage parseFrameMessage(byte[] data) {
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
         FrameMessage frame = new FrameMessage();
+        frame.timestampUs = buf.getLong();
         frame.outputId = buf.getInt();
         frame.width = buf.getInt();
         frame.height = buf.getInt();
@@ -116,6 +126,17 @@ public class Protocol {
         frame.pitch = buf.getInt();
         frame.size = buf.getInt();
         return frame;
+    }
+
+    public static AudioMessage parseAudioMessage(byte[] data) {
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        AudioMessage audio = new AudioMessage();
+        audio.timestampUs = buf.getLong();
+        audio.sampleRate = buf.getInt();
+        audio.channels = buf.getShort() & 0xFFFF;
+        audio.format = buf.getShort() & 0xFFFF;
+        audio.dataSize = buf.getInt();
+        return audio;
     }
 
     public static ConfigMessage parseConfigMessage(byte[] data) {

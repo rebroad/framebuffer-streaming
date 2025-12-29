@@ -5,16 +5,12 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.1.0'
+        classpath 'com.android.tools.build:gradle:8.5.2'
     }
 }
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
+// Note: Repositories are now managed in settings.gradle
+// The allprojects block is deprecated and removed to avoid Gradle 9.0 incompatibility warnings
 
 task clean(type: Delete) {
     delete rootProject.buildDir

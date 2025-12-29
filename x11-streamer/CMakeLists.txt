@@ -10,12 +10,14 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(X11 REQUIRED x11)
 pkg_check_modules(XRANDR REQUIRED xrandr)
 pkg_check_modules(DRM REQUIRED libdrm)
+pkg_check_modules(PULSE REQUIRED libpulse libpulse-simple)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${X11_INCLUDE_DIRS})
 include_directories(${XRANDR_INCLUDE_DIRS})
 include_directories(${DRM_INCLUDE_DIRS})
+include_directories(${PULSE_INCLUDE_DIRS})
 
 # Source files
 set(STREAMER_SOURCES
@@ -24,6 +26,7 @@ set(STREAMER_SOURCES
     src/x11_output.c
     src/drm_fb.c
     src/protocol.c
+    src/audio_capture.c
 )
 
 # Executable
@@ -34,6 +37,7 @@ target_link_libraries(x11-fb-streamer
     ${X11_LIBRARIES}
     ${XRANDR_LIBRARIES}
     ${DRM_LIBRARIES}
+    ${PULSE_LIBRARIES}
 )
 
 target_compile_options(x11-fb-streamer PRIVATE
