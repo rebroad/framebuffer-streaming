@@ -35,11 +35,14 @@ NDK/sysroot/usr/include/
 
 ## Solutions
 
-### Option 1: Use NDK DRM Headers with ioctl() (Current Approach)
+### Option 1: Use NDK DRM Headers with ioctl() (Implemented)
 - Use `drm/drm.h` and `drm/drm_mode.h` from NDK
 - Use `ioctl()` system calls directly (no libdrm needed)
 - More complex but works without external libraries
-- **Status**: ✅ Implemented (but currently disabled because HAVE_LIBDRM=0)
+- **Status**: ✅ Implemented with hybrid approach
+  - Tries libdrm functions first (via `dlsym()`) if `libdrm.so` is available at runtime
+  - Falls back to direct ioctl() calls if libdrm is not available
+  - No build-time dependency on libdrm
 
 ### Option 2: Cross-compile libdrm for Android
 - Build libdrm as a static library for Android
@@ -58,24 +61,32 @@ NDK/sysroot/usr/include/
 
 ## Current Implementation
 
-The code is structured to:
-1. **Try DRM access** (if libdrm available) - Currently disabled (HAVE_LIBDRM=0)
-2. **Try system properties** - ✅ Working
-3. **Fallback to Display API** - ✅ Working (current mode only)
+The code uses a hybrid approach with fallback chain:
+1. **Try DRM access via libdrm** (if `libdrm.so` available at runtime) - ✅ Implemented
+   - Uses `dlsym()` to load libdrm functions dynamically
+   - Cleaner API when available
+2. **Try DRM access via ioctl()** (direct system calls) - ✅ Implemented
+   - Uses NDK's `drm/drm.h` and `drm/drm_mode.h` headers
+   - Works without libdrm library
+   - May require root permissions on some devices
+3. **Try system properties** - ✅ Working
+   - Vendor-specific, not guaranteed
+4. **Fallback to Display API** - ✅ Working (current mode only)
+   - Always available but limited data
 
-## Why DRM Access is Disabled
+## Implementation Details
 
-The NDK doesn't provide `libdrm`, so `HAVE_LIBDRM=0` is set. The DRM code is conditionally compiled out. To enable it, we would need to:
-1. Cross-compile libdrm for Android
-2. Or rewrite to use ioctl() directly with NDK's `drm/drm.h` headers
+The DRM access code:
+- Defines libdrm structs manually (since libdrm headers aren't in NDK)
+- Tries to use libdrm functions first (cleaner code)
+- Falls back to ioctl() if libdrm not available (more complex but works)
+- Gracefully handles failures (may require root, but tries anyway)
 
 ## Recommendation
 
-For now, the **system properties approach (Option 2)** is the most practical:
-- Works on many Android devices
-- No need for root
-- No complex cross-compilation
-- Falls back gracefully to Display API if EDID not available
-
-If full EDID access is critical, we could implement Option 1 (ioctl() with NDK headers), but it's more complex and may require root permissions on the device.
+The **hybrid approach** is now implemented:
+- Best of both worlds: cleaner code when libdrm is available, working fallback when it's not
+- No build-time dependency on libdrm
+- Works on devices with or without libdrm
+- Falls back gracefully through the chain: libdrm → ioctl() → system properties → Display API
 

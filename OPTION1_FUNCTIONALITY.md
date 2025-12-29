@@ -1,21 +1,30 @@
 # Additional Functionality from Option 1 (DRM ioctl() Direct Access)
 
-## Current State
+## Current Implementation Status
 
-**What we have now:**
-1. **System Properties (Option 2)**: Tries to read EDID from Android system properties
+**✅ Option 1 is now implemented!**
+
+The Android TV receiver uses a hybrid approach with fallback chain:
+1. **DRM access via libdrm** (if available at runtime) - ✅ Implemented
+   - Uses `dlsym()` to load libdrm functions dynamically
+   - Cleaner API when available
+2. **DRM access via ioctl()** (direct system calls) - ✅ Implemented
+   - Uses NDK's `drm/drm.h` and `drm/drm_mode.h` headers
+   - Works without libdrm library
+   - May require root permissions on some devices
+3. **System Properties (Option 2)**: Tries to read EDID from Android system properties
    - ✅ Works on some devices (vendor-specific)
    - ❌ Not guaranteed to be available
    - ❌ May not contain complete mode list
    - ❌ Vendor-specific property names
 
-2. **Display API Fallback**: Uses Android's Display API
+4. **Display API Fallback**: Uses Android's Display API
    - ✅ Always available
    - ❌ **Only provides current mode** (resolution + refresh rate)
    - ❌ **No list of all supported modes**
    - ❌ Display name may be generic
 
-## What Option 1 (DRM ioctl()) Would Add
+## What Option 1 (DRM ioctl()) Adds
 
 ### 1. **Complete EDID Data Access**
 

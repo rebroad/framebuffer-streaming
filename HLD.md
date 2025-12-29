@@ -109,6 +109,11 @@ The server supports multiple methods for accessing framebuffer data:
 - UI for server connection (address, port)
 - SurfaceView for displaying frames
 - Connection management
+- Display capability detection:
+  - Tries DRM access (libdrm or ioctl()) to read EDID
+  - Falls back to system properties
+  - Final fallback to Display API (current mode only)
+- TV detection and rendering (uses Presentation API for external displays)
 
 **FrameReceiver.java**:
 - Network message reception loop
