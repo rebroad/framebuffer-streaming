@@ -34,7 +34,6 @@ typedef struct __attribute__((packed)) {
 // HELLO message
 typedef struct __attribute__((packed)) {
     uint16_t protocol_version;
-    uint16_t client_type;  // 0=Android, 1=RaspberryPi
     uint16_t num_modes;    // Number of supported display modes
     uint16_t display_name_len;  // Length of display name string
     // Followed by:
@@ -61,7 +60,7 @@ typedef struct __attribute__((packed)) {
     uint32_t refresh_rate;
 } config_message_t;
 
-// INPUT message (from client)
+// INPUT message (from TV receiver)
 typedef struct __attribute__((packed)) {
     uint8_t input_type;  // 0=touch, 1=key, 2=mouse
     uint32_t data_size;

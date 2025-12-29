@@ -328,6 +328,60 @@ RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
     return None;
 }
 
+void x11_context_delete_virtual_output(x11_context_t *ctx, RROutput output_id)
+{
+    if (!ctx || !ctx->display || output_id == None)
+        return;
+
+    // Find the XR-Manager output
+    XRRScreenResources *res = XRRGetScreenResources(ctx->display, ctx->root);
+    if (!res)
+        return;
+
+    RROutput manager_output = None;
+    for (int i = 0; i < res->noutput; i++) {
+        XRROutputInfo *output_info = XRRGetOutputInfo(ctx->display, res, res->outputs[i]);
+        if (output_info && output_info->connection == RR_Connected) {
+            if (strstr(output_info->name, "XR-Manager") != NULL) {
+                manager_output = res->outputs[i];
+                XRRFreeOutputInfo(output_info);
+                break;
+            }
+        }
+        if (output_info)
+            XRRFreeOutputInfo(output_info);
+    }
+
+    if (manager_output == None) {
+        XRRFreeScreenResources(res);
+        return;
+    }
+
+    // Get the DELETE_XR_OUTPUT atom
+    Atom delete_atom = get_atom(ctx->display, "DELETE_XR_OUTPUT");
+    if (delete_atom == None) {
+        XRRFreeScreenResources(res);
+        return;
+    }
+
+    // Format: "DELETE_XR_OUTPUT <output_id>"
+    char delete_cmd[64];
+    snprintf(delete_cmd, sizeof(delete_cmd), "%lu", (unsigned long)output_id);
+
+    // Set the property to trigger virtual output deletion
+    XRRChangeOutputProperty(ctx->display, manager_output, delete_atom,
+                           XA_STRING, 8, PropModeReplace,
+                           (unsigned char *)delete_cmd, strlen(delete_cmd));
+
+    XSync(ctx->display, False);
+
+    // Wait a bit for the output to be deleted, then refresh outputs
+    usleep(100000);  // 100ms
+    x11_context_refresh_outputs(ctx);
+
+    XRRFreeScreenResources(res);
+}
+
 int x11_context_get_fd(x11_context_t *ctx)
 {
     if (!ctx || !ctx->display)

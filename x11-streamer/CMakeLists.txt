@@ -18,25 +18,25 @@ include_directories(${XRANDR_INCLUDE_DIRS})
 include_directories(${DRM_INCLUDE_DIRS})
 
 # Source files
-set(SERVER_SOURCES
+set(STREAMER_SOURCES
     src/main.c
-    src/server.c
+    src/x11_streamer.c
     src/x11_output.c
     src/drm_fb.c
     src/protocol.c
 )
 
 # Executable
-add_executable(x11-fb-server ${SERVER_SOURCES})
+add_executable(x11-fb-streamer ${STREAMER_SOURCES})
 
 # Link libraries
-target_link_libraries(x11-fb-server
+target_link_libraries(x11-fb-streamer
     ${X11_LIBRARIES}
     ${XRANDR_LIBRARIES}
     ${DRM_LIBRARIES}
 )
 
-target_compile_options(x11-fb-server PRIVATE
+target_compile_options(x11-fb-streamer PRIVATE
     ${X11_CFLAGS_OTHER}
     ${XRANDR_CFLAGS_OTHER}
     ${DRM_CFLAGS_OTHER}

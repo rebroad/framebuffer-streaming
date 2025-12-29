@@ -63,13 +63,11 @@ public class Protocol {
         byte[] displayNameBytes = displayName.getBytes("UTF-8");
         int displayNameLen = displayNameBytes.length + 1; // Include null terminator
 
-        int payloadSize = 6 + displayNameLen + (modes != null ? modes.length * 12 : 0);
+        int payloadSize = 4 + displayNameLen + (modes != null ? modes.length * 12 : 0);
         ByteBuffer payload = ByteBuffer.allocate(payloadSize).order(ByteOrder.LITTLE_ENDIAN);
 
         // Protocol version
         payload.putShort((short)1);
-        // Client type (0=Android)
-        payload.putShort((short)0);
         // Number of modes
         payload.putShort((short)(modes != null ? modes.length : 0));
         // Display name length

@@ -22,15 +22,18 @@ public class FrameReceiver extends Thread {
     private SurfaceHolder surfaceHolder;
     private boolean running = false;
     private ConfigCallback configCallback;
+    private android.content.Context context;
 
     // Current configuration state
     private int currentWidth = 0;
     private int currentHeight = 0;
     private boolean connected = false;
+    private float savedBrightness = -1.0f;  // Store original brightness
 
-    public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder) {
+    public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder, android.content.Context context) {
         this.socket = socket;
         this.surfaceHolder = surfaceHolder;
+        this.context = context;
     }
 
     public void setConfigCallback(ConfigCallback callback) {
@@ -97,18 +100,25 @@ public class FrameReceiver extends Thread {
                     Protocol.ConfigMessage config = Protocol.parseConfigMessage(configData);
 
                     // Update state
+                    boolean wasConnected = connected;
                     currentWidth = config.width;
                     currentHeight = config.height;
                     connected = (config.width > 0 && config.height > 0);
 
+                    // Handle connection state changes
+                    if (wasConnected != connected) {
+                        if (!connected) {
+                            // Display turned off - turn off screen brightness
+                            turnOffDisplay();
+                        } else {
+                            // Display turned on - restore screen brightness
+                            turnOnDisplay();
+                        }
+                    }
+
                     // Notify callback
                     if (configCallback != null) {
                         configCallback.onConfigChanged(config);
-                    }
-
-                    // If disconnected, show "no signal" screen
-                    if (!connected) {
-                        drawNoSignal();
                     }
 
                 } else if (header.type == Protocol.MSG_PING) {
@@ -164,29 +174,81 @@ public class FrameReceiver extends Thread {
         }
     }
 
-    private void drawNoSignal() {
+    private void turnOffDisplay() {
+        if (context == null) return;
+
+        // Turn off display by setting brightness to 0
+        try {
+            // Save current brightness if not already saved
+            if (savedBrightness < 0) {
+                android.view.Window window = ((android.app.Activity) context).getWindow();
+                if (window != null) {
+                    android.view.WindowManager.LayoutParams params = window.getAttributes();
+                    savedBrightness = params.screenBrightness;
+                    if (savedBrightness < 0) {
+                        // Window uses system brightness, get it from settings
+                        try {
+                            int systemBrightness = android.provider.Settings.System.getInt(
+                                context.getContentResolver(),
+                                android.provider.Settings.System.SCREEN_BRIGHTNESS, 128);
+                            savedBrightness = systemBrightness / 255.0f;
+                        } catch (Exception e) {
+                            // Fallback to default
+                            savedBrightness = 0.5f;
+                        }
+                    }
+                } else {
+                    savedBrightness = 0.5f;  // Default if window not available
+                }
+            }
+
+            // Set brightness to 0 (effectively turns off display)
+            android.view.Window window = ((android.app.Activity) context).getWindow();
+            if (window != null) {
+                android.view.WindowManager.LayoutParams params = window.getAttributes();
+                params.screenBrightness = 0.0f;
+                window.setAttributes(params);
+            }
+
+            // Also clear the surface to black
+            clearSurface();
+        } catch (Exception e) {
+            e.printStackTrace();
+            // Fallback: clear surface to black
+            clearSurface();
+        }
+    }
+
+    private void turnOnDisplay() {
+        if (context == null) return;
+
+        // Restore display brightness
+        try {
+            android.view.Window window = ((android.app.Activity) context).getWindow();
+            if (window != null) {
+                android.view.WindowManager.LayoutParams params = window.getAttributes();
+                // Restore saved brightness, or use default if not saved
+                if (savedBrightness >= 0) {
+                    params.screenBrightness = savedBrightness;
+                } else {
+                    params.screenBrightness = -1.0f;  // Use system default
+                }
+                window.setAttributes(params);
+            }
+            savedBrightness = -1.0f;  // Reset saved brightness
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void clearSurface() {
         if (surfaceHolder == null) return;
 
         Canvas canvas = null;
         try {
             canvas = surfaceHolder.lockCanvas();
             if (canvas == null) return;
-
-            // Clear to black
             canvas.drawColor(Color.BLACK);
-
-            // Draw "NO SIGNAL" text
-            Paint paint = new Paint();
-            paint.setColor(Color.WHITE);
-            paint.setTextSize(48);
-            paint.setTypeface(Typeface.DEFAULT_BOLD);
-            paint.setTextAlign(Paint.Align.CENTER);
-
-            String text = "NO SIGNAL";
-            float x = canvas.getWidth() / 2.0f;
-            float y = canvas.getHeight() / 2.0f;
-            canvas.drawText(text, x, y, paint);
-
         } catch (Exception e) {
             e.printStackTrace();
         } finally {

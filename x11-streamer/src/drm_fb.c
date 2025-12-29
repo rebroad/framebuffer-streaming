@@ -175,7 +175,7 @@ int drm_fb_map(drm_fb_t *fb)
         return -1;
 
     // For DMA-BUF, we typically don't map it directly
-    // The client will import the DMA-BUF FD
+    // The TV receiver will import the DMA-BUF FD
     // But for fallback, we can try to map if it's a dumb buffer
     // For now, return success if we have a DMA-BUF FD
     if (fb->dma_fd >= 0)

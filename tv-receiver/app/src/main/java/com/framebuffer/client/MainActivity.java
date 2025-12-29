@@ -14,13 +14,15 @@ import java.net.Socket;
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     private SurfaceView surfaceView;
-    private EditText serverAddressEdit;
-    private EditText serverPortEdit;
-    private Button connectButton;
+    private EditText listenPortEdit;
+    private Button startStopButton;
+    private android.widget.TextView statusText;
 
-    private Socket socket;
+    private java.net.ServerSocket serverSocket;
+    private Socket clientSocket;
     private FrameReceiver frameReceiver;
-    private boolean connected = false;
+    private boolean listening = false;
+    private Thread serverThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -28,17 +30,21 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         setContentView(R.layout.activity_main);
 
         surfaceView = findViewById(R.id.surfaceView);
-        serverAddressEdit = findViewById(R.id.serverAddress);
-        serverPortEdit = findViewById(R.id.serverPort);
-        connectButton = findViewById(R.id.connectButton);
+        listenPortEdit = findViewById(R.id.serverPort);  // Reuse port field
+        startStopButton = findViewById(R.id.connectButton);  // Reuse button
+        statusText = findViewById(R.id.statusText);  // We'll need to add this
 
         surfaceView.getHolder().addCallback(this);
 
-        connectButton.setOnClickListener(v -> {
-            if (connected) {
-                disconnect();
+        // Set default port
+        listenPortEdit.setText("8888");
+        listenPortEdit.setHint("Listen Port");
+
+        startStopButton.setOnClickListener(v -> {
+            if (listening) {
+                stopListening();
             } else {
-                connect();
+                startListening();
             }
         });
     }
@@ -55,15 +61,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        disconnect();
+        stopListening();
     }
 
-    private void connect() {
-        String address = serverAddressEdit.getText().toString().trim();
-        String portStr = serverPortEdit.getText().toString().trim();
+    private void startListening() {
+        String portStr = listenPortEdit.getText().toString().trim();
 
-        if (address.isEmpty() || portStr.isEmpty()) {
-            Toast.makeText(this, "Please enter server address and port", Toast.LENGTH_SHORT).show();
+        if (portStr.isEmpty()) {
+            Toast.makeText(this, "Please enter listen port", Toast.LENGTH_SHORT).show(); // TODO jus pick a spare port, and display this on the TV until the server has connected to it.
             return;
         }
 
@@ -75,10 +80,29 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             return;
         }
 
-        new Thread(() -> {
+        listening = true;
+        startStopButton.setText("Stop Listening");
+        listenPortEdit.setEnabled(false);
+
+        serverThread = new Thread(() -> {
             try {
-                socket = new Socket(address, port);
-                connected = true;
+                serverSocket = new java.net.ServerSocket(port);
+
+                // Get local IP address for display
+                String localIp = getLocalIpAddress();
+
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    Toast.makeText(MainActivity.this,
+                        "Listening on port " + port + "\nIP: " + localIp,
+                        Toast.LENGTH_LONG).show();
+                });
+
+                // Wait for X11 server to connect
+                clientSocket = serverSocket.accept();
+
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    Toast.makeText(MainActivity.this, "X11 server connected", Toast.LENGTH_SHORT).show();
+                });
 
                 // Query display capabilities
                 android.view.Display display = getWindowManager().getDefaultDisplay();
@@ -93,7 +117,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     android.view.Display[] displays = dm.getDisplays();
                     if (displays.length > 0) {
                         android.view.Display d = displays[0];
-                        // Try to get display name from system properties or display info
                         displayName = d.getName();
                         if (displayName == null || displayName.isEmpty()) {
                             displayName = "Android Display";
@@ -115,10 +138,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 modes[0].refreshRate = refreshRateInt;
 
                 // Send HELLO with display name and modes
-                Protocol.sendHello(socket.getOutputStream(), displayName, modes);
+                Protocol.sendHello(clientSocket.getOutputStream(), displayName, modes);
 
                 // Start frame receiver
-                frameReceiver = new FrameReceiver(socket, surfaceView.getHolder());
+                frameReceiver = new FrameReceiver(clientSocket, surfaceView.getHolder(), MainActivity.this);
                 frameReceiver.setConfigCallback(config -> {
                     // Handle config changes on main thread
                     new Handler(Looper.getMainLooper()).post(() -> {
@@ -138,46 +161,88 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 });
                 frameReceiver.start();
 
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    connectButton.setText("Disconnect");
-                    Toast.makeText(this, "Connected", Toast.LENGTH_SHORT).show();
-                });
-
             } catch (IOException e) {
                 e.printStackTrace();
                 new Handler(Looper.getMainLooper()).post(() -> {
-                    Toast.makeText(this, "Connection failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    if (listening) {
+                        Toast.makeText(MainActivity.this, "Server error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
                 });
-                connected = false;
+            } finally {
+                listening = false;
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    startStopButton.setText("Start Listening");
+                    listenPortEdit.setEnabled(true);
+                });
             }
-        }).start();
+        });
+        serverThread.start();
     }
 
-    private void disconnect() {
-        connected = false;
+    private void stopListening() {
+        listening = false;
 
         if (frameReceiver != null) {
             frameReceiver.stopReceiving();
             frameReceiver = null;
         }
 
-        if (socket != null) {
+        if (clientSocket != null) {
             try {
-                socket.close();
+                clientSocket.close();
             } catch (IOException e) {
                 e.printStackTrace();
             }
-            socket = null;
+            clientSocket = null;
         }
 
-        connectButton.setText("Connect");
-        Toast.makeText(this, "Disconnected", Toast.LENGTH_SHORT).show();
+        if (serverSocket != null) {
+            try {
+                serverSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            serverSocket = null;
+        }
+
+        if (serverThread != null) {
+            try {
+                serverThread.join(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            serverThread = null;
+        }
+
+        startStopButton.setText("Start Listening");
+        listenPortEdit.setEnabled(true);
+        Toast.makeText(this, "Stopped listening", Toast.LENGTH_SHORT).show();
+    }
+
+    private String getLocalIpAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                java.net.NetworkInterface iface = interfaces.nextElement();
+                java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress addr = addresses.nextElement();
+                    if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return "Unknown";
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        disconnect();
+        stopListening();
     }
 }
 

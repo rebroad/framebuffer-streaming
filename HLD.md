@@ -204,7 +204,6 @@ The virtual displays created by the system behave **exactly like physical displa
 
 [Payload]
   - protocol_version: uint16 (currently 1)
-  - client_type: uint16 (0=Android, 1=RaspberryPi)
   - num_modes: uint16
   - display_name_len: uint16
   - display_name: string (null-terminated, display_name_len bytes)
