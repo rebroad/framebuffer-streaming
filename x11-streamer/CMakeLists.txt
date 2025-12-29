@@ -27,6 +27,7 @@ set(STREAMER_SOURCES
     src/drm_fb.c
     src/protocol.c
     src/audio_capture.c
+    src/dirty_rect.c
 )
 
 # Executable

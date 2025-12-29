@@ -3,6 +3,7 @@
 #include "drm_fb.h"
 #include "protocol.h"
 #include "audio_capture.h"
+#include "dirty_rect.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,10 @@ struct x11_streamer {
     pthread_mutex_t tv_mutex;
     pthread_t tv_thread;
     audio_capture_t *audio_capture;
+    int refresh_rate_hz;  // Display refresh rate for frame throttling
+    uint64_t last_frame_time_us;  // Last frame capture time (microseconds)
+    dirty_rect_context_t *dirty_rect_ctx;  // For dirty rectangle detection
+    uint8_t encoding_mode;  // Current encoding mode (0=full, 1=dirty rects, 2=H.264)
 };
 
 static void *tv_receiver_thread(void *arg)
@@ -112,9 +117,10 @@ static void *tv_receiver_thread(void *arg)
             );
 
             if (virtual_output_id != None) {
+                int refresh_rate = preferred_mode->refresh_rate / 100;
                 printf("Created virtual output: '%s' (%dx%d@%dHz)\n",
                        tv_display_name, preferred_mode->width,
-                       preferred_mode->height, preferred_mode->refresh_rate / 100);
+                       preferred_mode->height, refresh_rate);
                 // Refresh outputs to get the new virtual output
                 x11_context_refresh_outputs(streamer->x11_ctx);
 
@@ -125,6 +131,8 @@ static void *tv_receiver_thread(void *arg)
                            sizeof(streamer->tv_conn->display_name) - 1);
                     streamer->tv_conn->display_name[sizeof(streamer->tv_conn->display_name) - 1] = '\0';
                 }
+                streamer->refresh_rate_hz = refresh_rate;
+                streamer->last_frame_time_us = 0;
                 pthread_mutex_unlock(&streamer->tv_mutex);
             } else {
                 printf("Failed to create virtual output for TV receiver\n");
@@ -210,6 +218,56 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     if (!streamer->running || streamer->tv_fd < 0 || !output || !fb)
         return;
 
+    uint8_t encoding_mode = streamer->encoding_mode;
+    const void *frame_data = NULL;
+    size_t frame_data_size = 0;
+
+    // Get frame data (need mapped data for dirty rectangle detection)
+    if (fb->map) {
+        frame_data = fb->map;
+        frame_data_size = fb->size;
+    } else if (fb->dma_fd >= 0) {
+        // For DMA-BUF, we can't easily do dirty rectangle detection
+        // Fall back to full frame mode
+        encoding_mode = ENCODING_MODE_FULL_FRAME;
+    } else {
+        return;  // No data available
+    }
+
+    // Detect dirty rectangles if enabled
+    dirty_rect_t dirty_rects[64];  // Max 64 rectangles
+    int num_dirty_rects = 0;
+    uint64_t total_dirty_pixels = 0;
+
+    if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && streamer->dirty_rect_ctx && frame_data) {
+        // Ensure dirty rect context matches current frame size
+        if (!streamer->dirty_rect_ctx ||
+            dirty_rect_get_width(streamer->dirty_rect_ctx) != fb->width ||
+            dirty_rect_get_height(streamer->dirty_rect_ctx) != fb->height) {
+            if (streamer->dirty_rect_ctx)
+                dirty_rect_destroy(streamer->dirty_rect_ctx);
+            streamer->dirty_rect_ctx = dirty_rect_create(fb->width, fb->height, fb->bpp);
+        }
+
+        if (streamer->dirty_rect_ctx) {
+            num_dirty_rects = dirty_rect_detect(streamer->dirty_rect_ctx, frame_data,
+                                                dirty_rects, 64);
+
+            // Calculate total dirty pixels
+            for (int i = 0; i < num_dirty_rects; i++) {
+                total_dirty_pixels += dirty_rects[i].width * dirty_rects[i].height;
+            }
+
+            // If dirty region is too large (>50%), fall back to full frame
+            uint64_t total_pixels = fb->width * fb->height;
+            if (total_dirty_pixels > total_pixels / 2) {
+                encoding_mode = ENCODING_MODE_FULL_FRAME;
+                num_dirty_rects = 0;
+            }
+        }
+    }
+
+    // Prepare frame message
     frame_message_t frame = {
         .timestamp_us = audio_get_timestamp_us(),
         .output_id = output->output_id,
@@ -217,8 +275,22 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         .height = fb->height,
         .format = fb->format,
         .pitch = fb->pitch,
-        .size = fb->size
+        .encoding_mode = encoding_mode,
+        .num_regions = num_dirty_rects
     };
+
+    // Calculate total data size
+    if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && num_dirty_rects > 0) {
+        // Size = dirty rectangle headers + pixel data for each rectangle
+        frame.size = num_dirty_rects * sizeof(dirty_rectangle_t);
+        for (int i = 0; i < num_dirty_rects; i++) {
+            uint32_t rect_size = dirty_rects[i].width * dirty_rects[i].height * fb->bpp;
+            frame.size += rect_size;
+        }
+    } else {
+        // Full frame
+        frame.size = fb->size;
+    }
 
     // Send frame header
     if (protocol_send_message(streamer->tv_fd, MSG_FRAME, &frame, sizeof(frame)) < 0) {
@@ -227,10 +299,38 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         return;
     }
 
-    // For now, if we have DMA-BUF FD, send it via SCM_RIGHTS
-    // Otherwise, send the mapped data
-    if (fb->dma_fd >= 0) {
-        // Send DMA-BUF FD via ancillary data
+    // Send frame data
+    if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && num_dirty_rects > 0 && frame_data) {
+        // Send dirty rectangles
+        for (int i = 0; i < num_dirty_rects; i++) {
+            dirty_rectangle_t rect_msg = {
+                .x = dirty_rects[i].x,
+                .y = dirty_rects[i].y,
+                .width = dirty_rects[i].width,
+                .height = dirty_rects[i].height,
+                .data_size = dirty_rects[i].width * dirty_rects[i].height * fb->bpp
+            };
+
+            // Send rectangle header
+            if (send(streamer->tv_fd, &rect_msg, sizeof(rect_msg), MSG_NOSIGNAL) != sizeof(rect_msg)) {
+                printf("Failed to send dirty rectangle header\n");
+                return;
+            }
+
+            // Send rectangle pixel data
+            const uint8_t *src = (const uint8_t *)frame_data +
+                                 (dirty_rects[i].y * fb->pitch + dirty_rects[i].x * fb->bpp);
+            size_t rect_pitch = dirty_rects[i].width * fb->bpp;
+
+            for (uint32_t y = 0; y < dirty_rects[i].height; y++) {
+                if (send(streamer->tv_fd, src + y * fb->pitch, rect_pitch, MSG_NOSIGNAL) != (ssize_t)rect_pitch) {
+                    printf("Failed to send dirty rectangle data\n");
+                    return;
+                }
+            }
+        }
+    } else if (fb->dma_fd >= 0) {
+        // Send DMA-BUF FD via ancillary data (full frame only)
         struct msghdr msg = {0};
         struct iovec iov;
         char buf[CMSG_SPACE(sizeof(int))];
@@ -255,9 +355,9 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         if (sendmsg(streamer->tv_fd, &msg, 0) < 0) {
             printf("Failed to send DMA-BUF FD: %s\n", strerror(errno));
         }
-    } else if (fb->map) {
-        // Fallback: send mapped data
-        send(streamer->tv_fd, fb->map, fb->size, MSG_NOSIGNAL);
+    } else if (frame_data) {
+        // Send mapped data (full frame)
+        send(streamer->tv_fd, frame_data, frame_data_size, MSG_NOSIGNAL);
     }
 }
 
@@ -287,12 +387,22 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
         return;
     }
 
-    // Try to export as DMA-BUF (preferred method)
-    if (drm_fb_export_dma_buf(fb) < 0) {
-        // Fallback: map the framebuffer
+    // For dirty rectangles, we need mapped data, so always map
+    // For full frame mode, prefer DMA-BUF for zero-copy
+    if (streamer->encoding_mode == ENCODING_MODE_DIRTY_RECTS) {
+        // Always map for dirty rectangle detection
         if (drm_fb_map(fb) < 0) {
             drm_fb_close(fb);
             return;
+        }
+    } else {
+        // Try to export as DMA-BUF (preferred method for full frame)
+        if (drm_fb_export_dma_buf(fb) < 0) {
+            // Fallback: map the framebuffer
+            if (drm_fb_map(fb) < 0) {
+                drm_fb_close(fb);
+                return;
+            }
         }
     }
 
@@ -430,6 +540,10 @@ x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
         fprintf(stderr, "Warning: Failed to create audio capture\n");
     }
 
+    // Initialize encoding mode (default to dirty rectangles)
+    streamer->encoding_mode = ENCODING_MODE_DIRTY_RECTS;
+    streamer->dirty_rect_ctx = NULL;  // Will be created when we know frame size
+
     return streamer;
 }
 
@@ -459,6 +573,9 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
 
     if (streamer->audio_capture)
         audio_capture_destroy(streamer->audio_capture);
+
+    if (streamer->dirty_rect_ctx)
+        dirty_rect_destroy(streamer->dirty_rect_ctx);
 
     if (streamer->x11_ctx)
         x11_context_destroy(streamer->x11_ctx);
@@ -553,14 +670,35 @@ int x11_streamer_run(x11_streamer_t *streamer)
             }
         }
 
-        // Capture and send frames periodically
-        static int frame_counter = 0;
+        // Capture and send frames at display refresh rate
         static int refresh_counter = 0;
 
-        frame_counter++;
-        if (frame_counter >= 1) {  // Capture every poll iteration
-            streamer_capture_and_send_frames(streamer);
-            frame_counter = 0;
+        uint64_t now_us = audio_get_timestamp_us();
+        pthread_mutex_lock(&streamer->tv_mutex);
+        int refresh_rate = streamer->refresh_rate_hz;
+        uint64_t last_frame_time = streamer->last_frame_time_us;
+        pthread_mutex_unlock(&streamer->tv_mutex);
+
+        if (refresh_rate > 0) {
+            // Calculate frame interval in microseconds
+            uint64_t frame_interval_us = 1000000ULL / refresh_rate;
+
+            // Only capture if enough time has passed since last frame
+            if (now_us - last_frame_time >= frame_interval_us) {
+                streamer_capture_and_send_frames(streamer);
+
+                pthread_mutex_lock(&streamer->tv_mutex);
+                streamer->last_frame_time_us = now_us;
+                pthread_mutex_unlock(&streamer->tv_mutex);
+            }
+        } else {
+            // Fallback: capture at ~10 FPS if refresh rate unknown
+            static int frame_counter = 0;
+            frame_counter++;
+            if (frame_counter >= 10) {  // 100ms / 10 = 10 FPS
+                streamer_capture_and_send_frames(streamer);
+                frame_counter = 0;
+            }
         }
 
         // Capture and send audio (low latency, frequent reads)
