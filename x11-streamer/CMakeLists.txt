@@ -28,6 +28,7 @@ set(STREAMER_SOURCES
     src/protocol.c
     src/audio_capture.c
     src/dirty_rect.c
+    src/encoding_metrics.c
 )
 
 # Executable

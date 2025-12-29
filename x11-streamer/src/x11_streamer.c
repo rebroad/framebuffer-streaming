@@ -4,6 +4,7 @@
 #include "protocol.h"
 #include "audio_capture.h"
 #include "dirty_rect.h"
+#include "encoding_metrics.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ struct x11_streamer {
     uint64_t last_frame_time_us;  // Last frame capture time (microseconds)
     dirty_rect_context_t *dirty_rect_ctx;  // For dirty rectangle detection
     uint8_t encoding_mode;  // Current encoding mode (0=full, 1=dirty rects, 2=H.264)
+    encoding_metrics_t *metrics;  // Metrics for adaptive switching
 };
 
 static void *tv_receiver_thread(void *arg)
@@ -218,6 +220,7 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     if (!streamer->running || streamer->tv_fd < 0 || !output || !fb)
         return;
 
+    uint64_t encoding_start_us = audio_get_timestamp_us();
     uint8_t encoding_mode = streamer->encoding_mode;
     const void *frame_data = NULL;
     size_t frame_data_size = 0;
@@ -358,6 +361,64 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     } else if (frame_data) {
         // Send mapped data (full frame)
         send(streamer->tv_fd, frame_data, frame_data_size, MSG_NOSIGNAL);
+    }
+
+    // Calculate encoding time and bytes sent
+    uint64_t encoding_end_us = audio_get_timestamp_us();
+    uint64_t encoding_time_us = encoding_end_us - encoding_start_us;
+    uint64_t bytes_sent = sizeof(frame_message_t) + frame.size;
+
+    // Calculate total pixels and dirty pixels for metrics
+    uint64_t total_pixels = fb->width * fb->height;
+    uint64_t dirty_pixels = 0;
+    if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && num_dirty_rects > 0) {
+        dirty_pixels = total_dirty_pixels;
+    } else {
+        // Full frame - all pixels are "dirty"
+        dirty_pixels = total_pixels;
+    }
+
+    // Record metrics
+    if (streamer->metrics) {
+        encoding_metrics_record_frame(streamer->metrics,
+                                     bytes_sent,
+                                     dirty_pixels,
+                                     total_pixels,
+                                     encoding_time_us,
+                                     streamer->refresh_rate_hz);
+    }
+
+    // Check if we should switch encoding modes (adaptive switching)
+    if (streamer->metrics && streamer->refresh_rate_hz > 0) {
+        // Check if we should switch to H.264 (currently not implemented, so skip)
+        // For now, only switch between dirty rectangles and full frame
+        if (encoding_mode == ENCODING_MODE_DIRTY_RECTS) {
+            // Check if we should switch to full frame (temporary, until H.264 is implemented)
+            if (encoding_metrics_should_switch_to_h264(streamer->metrics, streamer->refresh_rate_hz)) {
+                // Switch to full frame mode (H.264 not implemented yet)
+                printf("Switching to full frame mode (dirty region too large)\n");
+                streamer->encoding_mode = ENCODING_MODE_FULL_FRAME;
+                encoding_metrics_reset(streamer->metrics);
+            }
+        } else if (encoding_mode == ENCODING_MODE_FULL_FRAME) {
+            // Check if we should switch back to dirty rectangles
+            if (encoding_metrics_should_switch_to_dirty_rects(streamer->metrics, streamer->refresh_rate_hz)) {
+                printf("Switching to dirty rectangles mode (conditions improved)\n");
+                streamer->encoding_mode = ENCODING_MODE_DIRTY_RECTS;
+                encoding_metrics_reset(streamer->metrics);
+            }
+        }
+    }
+
+    // Log metrics periodically (every 60 frames = ~1 second at 60 FPS)
+    static int log_counter = 0;
+    if (streamer->metrics && ++log_counter >= 60) {
+        log_counter = 0;
+        printf("Metrics: FPS=%.1f, BW=%.1f MB/s, Dirty=%.1f%%, Mode=%d\n",
+               encoding_metrics_get_fps(streamer->metrics),
+               encoding_metrics_get_bandwidth_mbps(streamer->metrics),
+               encoding_metrics_get_dirty_percent(streamer->metrics) * 100.0,
+               streamer->encoding_mode);
     }
 }
 
@@ -544,6 +605,12 @@ x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
     streamer->encoding_mode = ENCODING_MODE_DIRTY_RECTS;
     streamer->dirty_rect_ctx = NULL;  // Will be created when we know frame size
 
+    // Create metrics tracker (60 frame window = 1 second at 60 FPS)
+    streamer->metrics = encoding_metrics_create(60);
+    if (!streamer->metrics) {
+        fprintf(stderr, "Warning: Failed to create encoding metrics\n");
+    }
+
     return streamer;
 }
 
@@ -576,6 +643,9 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
 
     if (streamer->dirty_rect_ctx)
         dirty_rect_destroy(streamer->dirty_rect_ctx);
+
+    if (streamer->metrics)
+        encoding_metrics_destroy(streamer->metrics);
 
     if (streamer->x11_ctx)
         x11_context_destroy(streamer->x11_ctx);
