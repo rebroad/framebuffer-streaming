@@ -5,6 +5,9 @@
 #include "audio_capture.h"
 #include "dirty_rect.h"
 #include "encoding_metrics.h"
+#ifdef HAVE_X264
+#include "h264_encoder.h"
+#endif
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +44,9 @@ struct x11_streamer {
     dirty_rect_context_t *dirty_rect_ctx;  // For dirty rectangle detection
     uint8_t encoding_mode;  // Current encoding mode (0=full, 1=dirty rects, 2=H.264)
     encoding_metrics_t *metrics;  // Metrics for adaptive switching
+#ifdef HAVE_X264
+    h264_encoder_t *h264_encoder;  // H.264 encoder (when mode=2)
+#endif
 };
 
 static void *tv_receiver_thread(void *arg)
@@ -282,6 +288,42 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         .num_regions = num_dirty_rects
     };
 
+    // H.264 encoding if enabled
+    void *h264_data = NULL;
+    size_t h264_size = 0;
+
+#ifdef HAVE_X264
+    if (encoding_mode == ENCODING_MODE_H264 && frame_data) {
+        // Ensure H.264 encoder matches current frame size
+        if (!streamer->h264_encoder ||
+            h264_encoder_get_width(streamer->h264_encoder) != fb->width ||
+            h264_encoder_get_height(streamer->h264_encoder) != fb->height) {
+            if (streamer->h264_encoder)
+                h264_encoder_destroy(streamer->h264_encoder);
+            streamer->h264_encoder = h264_encoder_create(fb->width, fb->height,
+                                                         streamer->refresh_rate_hz, 0);
+            if (!streamer->h264_encoder) {
+                fprintf(stderr, "Failed to create H.264 encoder, falling back to full frame\n");
+                encoding_mode = ENCODING_MODE_FULL_FRAME;
+            }
+        }
+
+        if (streamer->h264_encoder) {
+            if (h264_encoder_encode_frame(streamer->h264_encoder, frame_data,
+                                        &h264_data, &h264_size) == 0) {
+                frame.size = h264_size;
+            } else {
+                fprintf(stderr, "H.264 encoding failed, falling back to full frame\n");
+                encoding_mode = ENCODING_MODE_FULL_FRAME;
+                if (h264_data) {
+                    free(h264_data);
+                    h264_data = NULL;
+                }
+            }
+        }
+    }
+#endif
+
     // Calculate total data size
     if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && num_dirty_rects > 0) {
         // Size = dirty rectangle headers + pixel data for each rectangle
@@ -290,6 +332,8 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
             uint32_t rect_size = dirty_rects[i].width * dirty_rects[i].height * fb->bpp;
             frame.size += rect_size;
         }
+    } else if (encoding_mode == ENCODING_MODE_H264 && h264_data) {
+        // H.264 encoded data size already set above
     } else {
         // Full frame
         frame.size = fb->size;
@@ -303,6 +347,15 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     }
 
     // Send frame data
+#ifdef HAVE_X264
+    if (encoding_mode == ENCODING_MODE_H264 && h264_data && h264_size > 0) {
+        // Send H.264 encoded data
+        if (send(streamer->tv_fd, h264_data, h264_size, MSG_NOSIGNAL) != (ssize_t)h264_size) {
+            printf("Failed to send H.264 data\n");
+        }
+        free(h264_data);
+    } else
+#endif
     if (encoding_mode == ENCODING_MODE_DIRTY_RECTS && num_dirty_rects > 0 && frame_data) {
         // Send dirty rectangles
         for (int i = 0; i < num_dirty_rects; i++) {
@@ -390,17 +443,34 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
 
     // Check if we should switch encoding modes (adaptive switching)
     if (streamer->metrics && streamer->refresh_rate_hz > 0) {
-        // Check if we should switch to H.264 (currently not implemented, so skip)
-        // For now, only switch between dirty rectangles and full frame
         if (encoding_mode == ENCODING_MODE_DIRTY_RECTS) {
-            // Check if we should switch to full frame (temporary, until H.264 is implemented)
+            // Check if we should switch to H.264
+#ifdef HAVE_X264
             if (encoding_metrics_should_switch_to_h264(streamer->metrics, streamer->refresh_rate_hz)) {
-                // Switch to full frame mode (H.264 not implemented yet)
-                printf("Switching to full frame mode (dirty region too large)\n");
+                printf("Switching to H.264 mode (dirty region too large or bandwidth high)\n");
+                streamer->encoding_mode = ENCODING_MODE_H264;
+                encoding_metrics_reset(streamer->metrics);
+            }
+#else
+            // H.264 not available, fall back to full frame
+            if (encoding_metrics_should_switch_to_h264(streamer->metrics, streamer->refresh_rate_hz)) {
+                printf("Switching to full frame mode (H.264 not available)\n");
                 streamer->encoding_mode = ENCODING_MODE_FULL_FRAME;
                 encoding_metrics_reset(streamer->metrics);
             }
-        } else if (encoding_mode == ENCODING_MODE_FULL_FRAME) {
+#endif
+        }
+#ifdef HAVE_X264
+        else if (encoding_mode == ENCODING_MODE_H264) {
+            // Check if we should switch back to dirty rectangles
+            if (encoding_metrics_should_switch_to_dirty_rects(streamer->metrics, streamer->refresh_rate_hz)) {
+                printf("Switching to dirty rectangles mode (conditions improved)\n");
+                streamer->encoding_mode = ENCODING_MODE_DIRTY_RECTS;
+                encoding_metrics_reset(streamer->metrics);
+            }
+        }
+#endif
+        else if (encoding_mode == ENCODING_MODE_FULL_FRAME) {
             // Check if we should switch back to dirty rectangles
             if (encoding_metrics_should_switch_to_dirty_rects(streamer->metrics, streamer->refresh_rate_hz)) {
                 printf("Switching to dirty rectangles mode (conditions improved)\n");
@@ -448,10 +518,11 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
         return;
     }
 
-    // For dirty rectangles, we need mapped data, so always map
+    // For dirty rectangles and H.264, we need mapped data, so always map
     // For full frame mode, prefer DMA-BUF for zero-copy
-    if (streamer->encoding_mode == ENCODING_MODE_DIRTY_RECTS) {
-        // Always map for dirty rectangle detection
+    if (streamer->encoding_mode == ENCODING_MODE_DIRTY_RECTS ||
+        streamer->encoding_mode == ENCODING_MODE_H264) {
+        // Always map for dirty rectangle detection or H.264 encoding
         if (drm_fb_map(fb) < 0) {
             drm_fb_close(fb);
             return;
@@ -605,6 +676,10 @@ x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
     streamer->encoding_mode = ENCODING_MODE_DIRTY_RECTS;
     streamer->dirty_rect_ctx = NULL;  // Will be created when we know frame size
 
+#ifdef HAVE_X264
+    streamer->h264_encoder = NULL;  // Will be created when needed
+#endif
+
     // Create metrics tracker (60 frame window = 1 second at 60 FPS)
     streamer->metrics = encoding_metrics_create(60);
     if (!streamer->metrics) {
@@ -643,6 +718,11 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
 
     if (streamer->dirty_rect_ctx)
         dirty_rect_destroy(streamer->dirty_rect_ctx);
+
+#ifdef HAVE_X264
+    if (streamer->h264_encoder)
+        h264_encoder_destroy(streamer->h264_encoder);
+#endif
 
     if (streamer->metrics)
         encoding_metrics_destroy(streamer->metrics);

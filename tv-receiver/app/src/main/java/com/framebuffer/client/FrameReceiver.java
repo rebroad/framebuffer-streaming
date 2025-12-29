@@ -32,6 +32,7 @@ public class FrameReceiver extends Thread {
     private boolean connected = false;
     private float savedBrightness = -1.0f;  // Store original brightness
     private Bitmap currentFrameBitmap;  // Store current frame for dirty rectangle compositing
+    private H264Decoder h264Decoder;  // H.264 decoder for encoded frames
 
     public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder, android.content.Context context) {
         this.socket = socket;
@@ -48,6 +49,10 @@ public class FrameReceiver extends Thread {
         if (audioReceiver != null) {
             audioReceiver.stop();
             audioReceiver = null;
+        }
+        if (h264Decoder != null) {
+            h264Decoder.release();
+            h264Decoder = null;
         }
         interrupt();
     }
@@ -76,7 +81,10 @@ public class FrameReceiver extends Thread {
 
                     // Only process frames if display is connected
                     if (connected && frame.width > 0 && frame.height > 0) {
-                        if (frame.encodingMode == Protocol.ENCODING_MODE_DIRTY_RECTS && frame.numRegions > 0) {
+                        if (frame.encodingMode == Protocol.ENCODING_MODE_H264) {
+                            // Handle H.264 encoded frame
+                            drawH264Frame(frame, in);
+                        } else if (frame.encodingMode == Protocol.ENCODING_MODE_DIRTY_RECTS && frame.numRegions > 0) {
                             // Handle dirty rectangles
                             drawDirtyRectangles(frame, in);
                         } else {
@@ -179,6 +187,49 @@ public class FrameReceiver extends Thread {
                 }
             }
         } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void drawH264Frame(Protocol.FrameMessage frame, InputStream in) {
+        if (surfaceHolder == null) return;
+
+        try {
+            // Initialize or recreate H.264 decoder if needed
+            if (h264Decoder == null ||
+                h264Decoder.getWidth() != frame.width ||
+                h264Decoder.getHeight() != frame.height) {
+                if (h264Decoder != null) {
+                    h264Decoder.release();
+                }
+
+                // Get Surface from SurfaceHolder
+                android.view.Surface surface = surfaceHolder.getSurface();
+                if (surface != null && surface.isValid()) {
+                    h264Decoder = new H264Decoder(frame.width, frame.height, surface);
+                    if (!h264Decoder.initialize()) {
+                        h264Decoder = null;
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            }
+
+            // Read H.264 encoded data
+            byte[] h264Data = new byte[frame.size];
+            int read = 0;
+            while (read < frame.size) {
+                int n = in.read(h264Data, read, frame.size - read);
+                if (n < 0) break;
+                read += n;
+            }
+
+            if (read == frame.size && h264Decoder != null) {
+                // Decode and display
+                h264Decoder.decode(h264Data, 0, frame.size);
+            }
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }

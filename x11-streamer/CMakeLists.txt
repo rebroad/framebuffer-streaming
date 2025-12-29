@@ -12,6 +12,18 @@ pkg_check_modules(XRANDR REQUIRED xrandr)
 pkg_check_modules(DRM REQUIRED libdrm)
 pkg_check_modules(PULSE REQUIRED libpulse libpulse-simple)
 
+# x264 (optional - check if available)
+find_library(X264_LIB x264 PATHS /usr/lib/x86_64-linux-gnu)
+if(X264_LIB)
+    set(X264_FOUND TRUE)
+    set(X264_LIBRARIES ${X264_LIB})
+    set(X264_INCLUDE_DIRS /usr/include)
+    message(STATUS "Found x264: ${X264_LIB}")
+else()
+    set(X264_FOUND FALSE)
+    message(WARNING "x264 not found - H.264 encoding will be disabled")
+endif()
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${X11_INCLUDE_DIRS})
@@ -31,6 +43,12 @@ set(STREAMER_SOURCES
     src/encoding_metrics.c
 )
 
+# Add H.264 encoder if available
+if(X264_FOUND)
+    list(APPEND STREAMER_SOURCES src/h264_encoder.c)
+    add_definitions(-DHAVE_X264)
+endif()
+
 # Executable
 add_executable(x11-fb-streamer ${STREAMER_SOURCES})
 
@@ -41,6 +59,12 @@ target_link_libraries(x11-fb-streamer
     ${DRM_LIBRARIES}
     ${PULSE_LIBRARIES}
 )
+
+# Link x264 if available
+if(X264_FOUND)
+    target_link_libraries(x11-fb-streamer ${X264_LIBRARIES})
+    target_include_directories(x11-fb-streamer PRIVATE ${X264_INCLUDE_DIRS})
+endif()
 
 target_compile_options(x11-fb-streamer PRIVATE
     ${X11_CFLAGS_OTHER}
