@@ -10,7 +10,6 @@ typedef enum {
     MSG_HELLO = 0x01,
     MSG_FRAME = 0x02,
     MSG_AUDIO = 0x03,
-    MSG_INPUT = 0x04,
     MSG_CONFIG = 0x05,
     MSG_PING = 0x06,
     MSG_PONG = 0x07,
@@ -87,13 +86,6 @@ typedef struct __attribute__((packed)) {
     uint32_t data_size;     // Size of audio data in bytes
     // Followed by audio data (PCM samples)
 } audio_message_t;
-
-// INPUT message (from TV receiver)
-typedef struct __attribute__((packed)) {
-    uint8_t input_type;  // 0=touch, 1=key, 2=mouse
-    uint32_t data_size;
-    // Followed by input data
-} input_message_t;
 
 int protocol_send_message(int fd, message_type_t type, const void *data, size_t data_len);
 int protocol_receive_message(int fd, message_header_t *header, void **payload);

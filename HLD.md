@@ -89,7 +89,6 @@ The server supports multiple methods for accessing framebuffer data:
   - `MSG_HELLO`: Client handshake with display capabilities
   - `MSG_FRAME`: Framebuffer frame data
   - `MSG_CONFIG`: Output configuration changes (resolution, refresh rate, on/off)
-  - `MSG_INPUT`: Input events from client (planned)
   - `MSG_AUDIO`: Audio data (planned)
   - `MSG_PING/PONG`: Keepalive
 

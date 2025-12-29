@@ -183,11 +183,6 @@ static void *tv_receiver_thread(void *arg)
             protocol_send_message(streamer->tv_fd, MSG_PONG, NULL, 0);
             break;
 
-        case MSG_INPUT:
-            // Input forwarding not implemented (out of scope - Android app is display-only)
-            printf("Received input message from TV receiver (ignored - input forwarding not implemented)\n");
-            break;
-
         default:
             printf("Unknown message type from TV receiver: %d\n", header.type);
             break;

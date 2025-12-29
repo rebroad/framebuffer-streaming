@@ -10,7 +10,6 @@ public class Protocol {
     public static final byte MSG_HELLO = 0x01;
     public static final byte MSG_FRAME = 0x02;
     public static final byte MSG_AUDIO = 0x03;
-    public static final byte MSG_INPUT = 0x04;
     public static final byte MSG_CONFIG = 0x05;
     public static final byte MSG_PING = 0x06;
     public static final byte MSG_PONG = 0x07;
