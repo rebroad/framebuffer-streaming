@@ -117,6 +117,8 @@ drm_fb_t *drm_fb_open(uint32_t fb_id)
     fb->pitch = fb_info->pitch;
     fb->bpp = fb_info->bpp;
     fb->size = fb_info->height * fb_info->pitch;
+    // Default to ARGB8888 format (most common)
+    fb->format = 0x34325241;  // DRM_FORMAT_ARGB8888
 
     drmModeFreeFB(fb_info);
 

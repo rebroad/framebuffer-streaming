@@ -40,5 +40,9 @@ target_compile_options(x11-fb-server PRIVATE
     ${X11_CFLAGS_OTHER}
     ${XRANDR_CFLAGS_OTHER}
     ${DRM_CFLAGS_OTHER}
+    -Wall
+    -Wextra
+    -Werror
+    -Wno-format-truncation  # Allow format truncation warnings (safe for our use case)
 )
 

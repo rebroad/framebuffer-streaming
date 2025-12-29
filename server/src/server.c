@@ -18,6 +18,7 @@ typedef struct client {
     bool active;
     pthread_t thread;
     struct client *next;
+    server_t *server;  // Reference to server for frame sending
 } client_t;
 
 struct server {
@@ -32,7 +33,7 @@ struct server {
 static void *client_thread(void *arg)
 {
     client_t *client = (client_t *)arg;
-    server_t *server = (server_t *)client->next;  // Hack: store server pointer
+    (void)client->server;  // Available for future use
     message_header_t header;
     void *payload = NULL;
 
@@ -98,7 +99,8 @@ cleanup:
     return NULL;
 }
 
-static void server_send_frame_to_client(server_t *server, client_t *client,
+static void server_send_frame_to_client(server_t *server __attribute__((unused)),
+                                         client_t *client,
                                          output_info_t *output, drm_fb_t *fb)
 {
     if (!client->active || !output || !fb)
@@ -166,6 +168,50 @@ static void server_broadcast_frame(server_t *server, output_info_t *output, drm_
     }
 
     pthread_mutex_unlock(&server->clients_mutex);
+}
+
+static void server_capture_and_broadcast_frames(server_t *server)
+{
+    if (!server || !server->x11_ctx || !server->x11_ctx->outputs)
+        return;
+
+    // Check if we have any active clients
+    pthread_mutex_lock(&server->clients_mutex);
+    bool has_clients = (server->clients != NULL);
+    pthread_mutex_unlock(&server->clients_mutex);
+
+    if (!has_clients)
+        return;  // No clients connected, skip capture
+
+    // Capture frames from all outputs
+    for (int i = 0; i < server->x11_ctx->num_outputs; i++) {
+        output_info_t *output = &server->x11_ctx->outputs[i];
+
+        if (!output->connected || output->framebuffer_id == 0)
+            continue;
+
+        // Open framebuffer
+        drm_fb_t *fb = drm_fb_open(output->framebuffer_id);
+        if (!fb) {
+            // Framebuffer might have changed, refresh outputs
+            continue;
+        }
+
+        // Try to export as DMA-BUF (preferred method)
+        if (drm_fb_export_dma_buf(fb) < 0) {
+            // Fallback: map the framebuffer
+            if (drm_fb_map(fb) < 0) {
+                drm_fb_close(fb);
+                continue;
+            }
+        }
+
+        // Broadcast to all clients
+        server_broadcast_frame(server, output, fb);
+
+        // Close framebuffer (clients should have received the data/FD)
+        drm_fb_close(fb);
+    }
 }
 
 server_t *server_create(int port)
@@ -297,14 +343,18 @@ int server_run(server_t *server)
                 if (client) {
                     client->fd = client_fd;
                     client->active = true;
+                    client->server = server;
                     client->next = server->clients;
-                    server->clients = client;
 
-                    // Store server pointer in client struct (hack)
-                    client->next = (client_t *)server;
+                    pthread_mutex_lock(&server->clients_mutex);
+                    server->clients = client;
+                    pthread_mutex_unlock(&server->clients_mutex);
 
                     if (pthread_create(&client->thread, NULL,
                                        client_thread, client) != 0) {
+                        pthread_mutex_lock(&server->clients_mutex);
+                        server->clients = client->next;
+                        pthread_mutex_unlock(&server->clients_mutex);
                         close(client_fd);
                         free(client);
                     }
@@ -314,10 +364,21 @@ int server_run(server_t *server)
             }
         }
 
-        // TODO: Capture and broadcast frames periodically
-        // For now, just refresh outputs occasionally
+        // Capture and broadcast frames periodically
+        static int frame_counter = 0;
         static int refresh_counter = 0;
-        if (++refresh_counter > 60) {
+
+        // Capture frames at ~30 FPS (every ~33ms, but we poll every 1000ms, so every poll)
+        // For better frame rate, we'd need a separate thread or use timerfd
+        frame_counter++;
+        if (frame_counter >= 1) {  // Capture every poll iteration (~1 FPS for now, can be optimized)
+            server_capture_and_broadcast_frames(server);
+            frame_counter = 0;
+        }
+
+        // Refresh outputs occasionally (every 60 seconds)
+        refresh_counter++;
+        if (refresh_counter >= 60) {
             x11_context_refresh_outputs(server->x11_ctx);
             refresh_counter = 0;
         }
