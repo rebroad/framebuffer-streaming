@@ -9,10 +9,18 @@
 #include <cstring>
 
 #if defined(HAVE_LIBDRM) && HAVE_LIBDRM
-#include <linux/drm.h>
-#include <linux/drm_mode.h>
-#include <xf86drm.h>
-#include <xf86drmMode.h>
+// Note: NDK provides drm/drm.h and drm/drm_mode.h (not linux/drm.h)
+// However, libdrm library functions (drmModeGetConnector, etc.) are NOT in the NDK
+// They would need to be:
+//   a) Cross-compiled as a static library, OR
+//   b) Available on the device at runtime (unlikely without root)
+// For now, this code is disabled (HAVE_LIBDRM=0) because libdrm is not found
+// We could rewrite to use ioctl() directly, but that's more complex
+#include <drm/drm.h>
+#include <drm/drm_mode.h>
+// These would be needed if we had libdrm:
+// #include <xf86drm.h>
+// #include <xf86drmMode.h>
 #endif
 
 #define LOG_TAG "EdidParser"
