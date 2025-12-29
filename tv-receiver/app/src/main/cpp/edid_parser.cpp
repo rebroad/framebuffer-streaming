@@ -7,21 +7,83 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <cstring>
+#include <cstdlib>
+#include <errno.h>
+#include <dlfcn.h>
 
-#if defined(HAVE_LIBDRM) && HAVE_LIBDRM
-// Note: NDK provides drm/drm.h and drm/drm_mode.h (not linux/drm.h)
-// However, libdrm library functions (drmModeGetConnector, etc.) are NOT in the NDK
-// They would need to be:
-//   a) Cross-compiled as a static library, OR
-//   b) Available on the device at runtime (unlikely without root)
-// For now, this code is disabled (HAVE_LIBDRM=0) because libdrm is not found
-// We could rewrite to use ioctl() directly, but that's more complex
+// NDK provides drm/drm.h and drm/drm_mode.h (not linux/drm.h)
+// We try to use libdrm functions if available at runtime, otherwise fall back to ioctl()
 #include <drm/drm.h>
 #include <drm/drm_mode.h>
-// These would be needed if we had libdrm:
-// #include <xf86drm.h>
-// #include <xf86drmMode.h>
+
+// Define libdrm structs ourselves (since libdrm headers aren't in NDK)
+// These match the actual libdrm structure definitions
+struct _drmModeRes {
+    int count_fbs;
+    uint32_t *fbs;
+    int count_crtcs;
+    uint32_t *crtcs;
+    int count_connectors;
+    uint32_t *connectors;
+    int count_encoders;
+    uint32_t *encoders;
+    uint32_t min_width, max_width;
+    uint32_t min_height, max_height;
+};
+
+struct _drmModeConnector {
+    uint32_t connector_id;
+    uint32_t encoder_id;
+    uint32_t connector_type;
+    uint32_t connector_type_id;
+    uint32_t connection;
+    uint32_t mmWidth, mmHeight;
+    uint32_t subpixel;
+    int count_modes;
+    void *modes;  // drmModeModeInfoPtr
+    int count_props;
+    uint32_t *props;
+    uint64_t *prop_values;
+    int count_encoders;
+    uint32_t *encoders;
+};
+
+struct _drmModeProperty {
+    uint32_t prop_id;
+    uint32_t flags;
+    char name[32];  // DRM_PROP_NAME_LEN is 32
+    int count_values;
+    uint64_t *values;
+    int count_enums;
+    void *enums;  // drmModePropertyEnumPtr
+    int count_blobs;
+    uint32_t *blob_ids;
+};
+
+struct _drmModePropertyBlob {
+    uint32_t id;
+    uint32_t length;
+    void *data;
+};
+
+typedef struct _drmModeRes drmModeRes;
+typedef struct _drmModeConnector drmModeConnector;
+typedef struct _drmModeProperty drmModeProperty;
+typedef struct _drmModePropertyBlob drmModePropertyBlob;
+
+// DRM_MODE_CONNECTED constant (from drm_mode.h)
+#ifndef DRM_MODE_CONNECTED
+#define DRM_MODE_CONNECTED 1
 #endif
+
+typedef drmModeRes* (*drmModeGetResourcesFunc)(int fd);
+typedef drmModeConnector* (*drmModeGetConnectorFunc)(int fd, uint32_t connectorId);
+typedef drmModeProperty* (*drmModeGetPropertyFunc)(int fd, uint32_t propertyId);
+typedef drmModePropertyBlob* (*drmModeGetPropertyBlobFunc)(int fd, uint32_t blobId);
+typedef void (*drmModeFreeResourcesFunc)(drmModeRes* ptr);
+typedef void (*drmModeFreeConnectorFunc)(drmModeConnector* ptr);
+typedef void (*drmModeFreePropertyFunc)(drmModeProperty* ptr);
+typedef void (*drmModeFreePropertyBlobFunc)(drmModePropertyBlob* ptr);
 
 #define LOG_TAG "EdidParser"
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -131,10 +193,238 @@ static bool parseEdidBasic(const uint8_t* edid, size_t edidLen,
     return true;
 }
 
-// Get EDID from DRM/KMS (Option 4)
+// Try to get EDID using libdrm functions (cleaner API if available)
+static jbyteArray get_edid_via_libdrm(JNIEnv *env, int fd) {
+    void* libdrm_handle = dlopen("libdrm.so", RTLD_LAZY);
+    if (!libdrm_handle) {
+        return nullptr;
+    }
+
+    // Load libdrm functions
+    drmModeGetResourcesFunc drmModeGetResources = (drmModeGetResourcesFunc)dlsym(libdrm_handle, "drmModeGetResources");
+    drmModeGetConnectorFunc drmModeGetConnector = (drmModeGetConnectorFunc)dlsym(libdrm_handle, "drmModeGetConnector");
+    drmModeGetPropertyFunc drmModeGetProperty = (drmModeGetPropertyFunc)dlsym(libdrm_handle, "drmModeGetProperty");
+    drmModeGetPropertyBlobFunc drmModeGetPropertyBlob = (drmModeGetPropertyBlobFunc)dlsym(libdrm_handle, "drmModeGetPropertyBlob");
+    drmModeFreeResourcesFunc drmModeFreeResources = (drmModeFreeResourcesFunc)dlsym(libdrm_handle, "drmModeFreeResources");
+    drmModeFreeConnectorFunc drmModeFreeConnector = (drmModeFreeConnectorFunc)dlsym(libdrm_handle, "drmModeFreeConnector");
+    drmModeFreePropertyFunc drmModeFreeProperty = (drmModeFreePropertyFunc)dlsym(libdrm_handle, "drmModeFreeProperty");
+    drmModeFreePropertyBlobFunc drmModeFreePropertyBlob = (drmModeFreePropertyBlobFunc)dlsym(libdrm_handle, "drmModeFreePropertyBlob");
+
+    if (!drmModeGetResources || !drmModeGetConnector || !drmModeGetProperty ||
+        !drmModeGetPropertyBlob || !drmModeFreeResources || !drmModeFreeConnector ||
+        !drmModeFreeProperty || !drmModeFreePropertyBlob) {
+        dlclose(libdrm_handle);
+        return nullptr;
+    }
+
+    drmModeRes* resources = drmModeGetResources(fd);
+    if (!resources) {
+        dlclose(libdrm_handle);
+        return nullptr;
+    }
+
+    jbyteArray result = nullptr;
+
+    // Find first connected connector
+    for (int i = 0; i < resources->count_connectors; i++) {
+        drmModeConnector* connector = drmModeGetConnector(fd, resources->connectors[i]);
+        if (!connector) continue;
+
+        if (connector->connection == DRM_MODE_CONNECTED) {
+            ALOGI("Found connected connector: %d (using libdrm)", connector->connector_id);
+
+            // Get properties
+            for (int j = 0; j < connector->count_props; j++) {
+                drmModeProperty* prop = drmModeGetProperty(fd, connector->props[j]);
+                if (!prop) continue;
+
+                if (strcmp(prop->name, "EDID") == 0) {
+                    uint64_t blobId = connector->prop_values[j];
+                    drmModePropertyBlob* blob = drmModeGetPropertyBlob(fd, blobId);
+
+                    if (blob && blob->data && blob->length > 0) {
+                        ALOGI("Found EDID blob via libdrm, size: %u", blob->length);
+
+                        result = env->NewByteArray(blob->length);
+                        if (result) {
+                            env->SetByteArrayRegion(result, 0, blob->length, (const jbyte*)blob->data);
+                        }
+
+                        drmModeFreePropertyBlob(blob);
+                        drmModeFreeProperty(prop);
+                        drmModeFreeConnector(connector);
+                        drmModeFreeResources(resources);
+                        dlclose(libdrm_handle);
+                        return result;
+                    }
+
+                    if (blob) drmModeFreePropertyBlob(blob);
+                }
+
+                drmModeFreeProperty(prop);
+            }
+        }
+
+        drmModeFreeConnector(connector);
+    }
+
+    drmModeFreeResources(resources);
+    dlclose(libdrm_handle);
+    return nullptr;
+}
+
+// Get EDID from DRM/KMS using ioctl() directly (fallback when libdrm not available)
+// This may fail without root access, but we try anyway
+static jbyteArray get_edid_via_ioctl(JNIEnv *env, int fd) {
+    // Step 1: Get resources (first call to get counts)
+    struct drm_mode_card_res res;
+    memset(&res, 0, sizeof(res));
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        ALOGW("Failed to get DRM resources: %s", strerror(errno));
+        return nullptr;
+    }
+
+    if (res.count_connectors == 0) {
+        ALOGD("No connectors found");
+        return nullptr;
+    }
+
+    // Step 2: Allocate memory and get connector IDs
+    uint32_t *connector_ids = (uint32_t*)malloc(res.count_connectors * sizeof(uint32_t));
+    if (!connector_ids) {
+        ALOGE("Failed to allocate memory for connector IDs");
+        return nullptr;
+    }
+
+    res.connector_id_ptr = (uint64_t)(unsigned long)connector_ids;
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        ALOGW("Failed to get connector IDs: %s", strerror(errno));
+        free(connector_ids);
+        return nullptr;
+    }
+
+    // Step 3: Iterate through connectors
+    for (uint32_t i = 0; i < res.count_connectors; i++) {
+        struct drm_mode_get_connector conn;
+        memset(&conn, 0, sizeof(conn));
+        conn.connector_id = connector_ids[i];
+
+        // First call to get property counts
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0) {
+            ALOGW("Failed to get connector %u info: %s", connector_ids[i], strerror(errno));
+            continue;
+        }
+
+        // Check if connector is connected
+        if (conn.connection != DRM_MODE_CONNECTED) {
+            ALOGD("Connector %u is not connected", connector_ids[i]);
+            continue;
+        }
+
+        ALOGI("Found connected connector: %u", connector_ids[i]);
+
+        if (conn.count_props == 0) {
+            ALOGD("Connector %u has no properties", connector_ids[i]);
+            continue;
+        }
+
+        // Step 4: Allocate memory for properties
+        uint32_t *prop_ids = (uint32_t*)malloc(conn.count_props * sizeof(uint32_t));
+        uint64_t *prop_values = (uint64_t*)malloc(conn.count_props * sizeof(uint64_t));
+        if (!prop_ids || !prop_values) {
+            ALOGE("Failed to allocate memory for properties");
+            free(prop_ids);
+            free(prop_values);
+            continue;
+        }
+
+        conn.props_ptr = (uint64_t)(unsigned long)prop_ids;
+        conn.prop_values_ptr = (uint64_t)(unsigned long)prop_values;
+
+        // Second call to get property IDs and values
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0) {
+            ALOGW("Failed to get connector %u properties: %s", connector_ids[i], strerror(errno));
+            free(prop_ids);
+            free(prop_values);
+            continue;
+        }
+
+        // Step 5: Iterate through properties to find EDID
+        for (uint32_t j = 0; j < conn.count_props; j++) {
+                struct drm_mode_get_property prop;
+                memset(&prop, 0, sizeof(prop));
+                prop.prop_id = prop_ids[j];
+
+                // Get property info (name is included directly in the struct)
+                if (ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, &prop) < 0) {
+                    ALOGW("Failed to get property %u info: %s", prop_ids[j], strerror(errno));
+                    continue;
+                }
+
+                // Check if this is the EDID property (name is already in the struct)
+                if (strcmp(prop.name, "EDID") == 0) {
+                    ALOGI("Found EDID property, blob_id=%llu", (unsigned long long)prop_values[j]);
+
+                    // Step 6: Get the EDID blob
+                    struct drm_mode_get_blob blob;
+                    memset(&blob, 0, sizeof(blob));
+                    blob.blob_id = prop_values[j];
+
+                    // First call to get blob size
+                    if (ioctl(fd, DRM_IOCTL_MODE_GETPROPBLOB, &blob) < 0) {
+                        ALOGW("Failed to get EDID blob info: %s", strerror(errno));
+                        continue;
+                    }
+
+                    if (blob.length == 0) {
+                        ALOGW("EDID blob has zero length");
+                        continue;
+                    }
+
+                    // Allocate memory for blob data
+                    void *blob_data = malloc(blob.length);
+                    if (!blob_data) {
+                        ALOGE("Failed to allocate memory for EDID blob");
+                        continue;
+                    }
+
+                    blob.data = (uint64_t)(unsigned long)blob_data;
+
+                    // Second call to get blob data
+                    if (ioctl(fd, DRM_IOCTL_MODE_GETPROPBLOB, &blob) < 0) {
+                        ALOGW("Failed to get EDID blob data: %s", strerror(errno));
+                        free(blob_data);
+                        continue;
+                    }
+
+                    ALOGI("Successfully read EDID blob via ioctl, size: %u", blob.length);
+
+                    // Create Java byte array
+                    jbyteArray result = env->NewByteArray(blob.length);
+                    if (result) {
+                        env->SetByteArrayRegion(result, 0, blob.length, (const jbyte*)blob_data);
+                    }
+
+                    // Cleanup
+                    free(blob_data);
+                    free(prop_ids);
+                    free(prop_values);
+                    free(connector_ids);
+                    return result;
+            }
+        }
+
+        free(prop_ids);
+        free(prop_values);
+    }
+
+    free(connector_ids);
+    return nullptr;
+}
+
+// Main entry point: Try libdrm first, fall back to ioctl()
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_framebuffer_client_EdidParser_getEdidFromDrmNative(JNIEnv *env, jclass clazz) {
-#if defined(HAVE_LIBDRM) && HAVE_LIBDRM
     ALOGI("Attempting to get EDID from DRM/KMS");
 
     // Try common DRM device paths
@@ -148,71 +438,30 @@ Java_com_framebuffer_client_EdidParser_getEdidFromDrmNative(JNIEnv *env, jclass 
     for (const char* drmPath : drmPaths) {
         int fd = open(drmPath, O_RDWR);
         if (fd < 0) {
+            ALOGD("Failed to open DRM device %s: %s", drmPath, strerror(errno));
             continue;
         }
 
         ALOGI("Opened DRM device: %s", drmPath);
 
-        // Get resources
-        drmModeResPtr resources = drmModeGetResources(fd);
-        if (!resources) {
+        // First try libdrm functions (cleaner API if available)
+        jbyteArray result = get_edid_via_libdrm(env, fd);
+        if (result) {
             close(fd);
-            continue;
+            return result;
         }
 
-        // Find first connected connector
-        for (int i = 0; i < resources->count_connectors; i++) {
-            drmModeConnectorPtr connector = drmModeGetConnector(fd, resources->connectors[i]);
-            if (!connector) continue;
-
-            if (connector->connection == DRM_MODE_CONNECTED) {
-                ALOGI("Found connected connector: %d", connector->connector_id);
-
-                // Get properties
-                for (int j = 0; j < connector->count_props; j++) {
-                    drmModePropertyPtr prop = drmModeGetProperty(fd, connector->props[j]);
-                    if (!prop) continue;
-
-                    if (strcmp(prop->name, "EDID") == 0) {
-                        uint64_t blobId = connector->prop_values[j];
-                        drmModePropertyBlobPtr blob = drmModeGetPropertyBlob(fd, blobId);
-
-                        if (blob && blob->data && blob->length > 0) {
-                            ALOGI("Found EDID blob, size: %zu", blob->length);
-
-                            // Create Java byte array
-                            jbyteArray result = env->NewByteArray(blob->length);
-                            if (result) {
-                                env->SetByteArrayRegion(result, 0, blob->length,
-                                                       (const jbyte*)blob->data);
-                            }
-
-                            drmModeFreePropertyBlob(blob);
-                            drmModeFreeProperty(prop);
-                            drmModeFreeConnector(connector);
-                            drmModeFreeResources(resources);
-                            close(fd);
-                            return result;
-                        }
-
-                        if (blob) drmModeFreePropertyBlob(blob);
-                    }
-
-                    drmModeFreeProperty(prop);
-                }
-            }
-
-            drmModeFreeConnector(connector);
+        // Fall back to ioctl() if libdrm not available
+        result = get_edid_via_ioctl(env, fd);
+        if (result) {
+            close(fd);
+            return result;
         }
 
-        drmModeFreeResources(resources);
         close(fd);
     }
 
-    ALOGW("Could not find EDID from DRM devices");
-#else
-    ALOGW("libdrm not available - cannot get EDID from DRM");
-#endif
+    ALOGW("Could not find EDID from any DRM device (may require root access)");
     return nullptr;
 }
 

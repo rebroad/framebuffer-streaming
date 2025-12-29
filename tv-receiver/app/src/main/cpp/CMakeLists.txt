@@ -19,14 +19,7 @@ target_include_directories(edidparser PRIVATE
     ${CMAKE_SYSROOT}/usr/include
 )
 
-# Try to find libdrm, but don't fail if not found
-find_library(drm_LIB drm)
-if(drm_LIB)
-    target_link_libraries(edidparser ${drm_LIB})
-    target_compile_definitions(edidparser PRIVATE HAVE_LIBDRM=1)
-    message(STATUS "Found libdrm: ${drm_LIB}")
-else()
-    message(WARNING "libdrm not found - DRM EDID access will not be available")
-    target_compile_definitions(edidparser PRIVATE HAVE_LIBDRM=0)
-endif()
+# Note: We use ioctl() directly with NDK's drm/drm.h headers
+# No need for libdrm library - we implement the DRM access ourselves
+message(STATUS "Using direct ioctl() for DRM access (no libdrm dependency)")
 
