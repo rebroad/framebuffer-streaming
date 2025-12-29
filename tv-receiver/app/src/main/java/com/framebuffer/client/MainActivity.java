@@ -25,6 +25,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private Thread serverThread;
     private android.hardware.display.DisplayManager displayManager;
     private android.hardware.display.DisplayManager.DisplayListener displayListener;
+    private android.app.Presentation tvPresentation;
+    private SurfaceView tvSurfaceView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -174,25 +176,58 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     }
                 }
 
-                // Get refresh rate
+                // Get refresh rate from target display
                 float refreshRate = targetDisplay.getRefreshRate();
                 int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
 
-                // Create display modes (for now, just the current resolution)
-                Protocol.DisplayMode[] modes = new Protocol.DisplayMode[1];
-                modes[0] = new Protocol.DisplayMode();
-                modes[0].width = size.x;
-                modes[0].height = size.y;
-                modes[0].refreshRate = refreshRateInt;
+                // Query all supported display modes from the target display
+                // Android doesn't provide a direct API for all modes, so we'll create
+                // a reasonable set based on the display's capabilities
+                java.util.ArrayList<Protocol.DisplayMode> modeList = new java.util.ArrayList<>();
+
+                // Add current mode
+                Protocol.DisplayMode currentMode = new Protocol.DisplayMode();
+                currentMode.width = size.x;
+                currentMode.height = size.y;
+                currentMode.refreshRate = refreshRateInt;
+                modeList.add(currentMode);
+
+                // Add common resolutions that the display likely supports
+                // (TVs typically support multiple resolutions)
+                int[][] commonResolutions = {
+                    {1920, 1080},  // Full HD
+                    {1280, 720},   // HD
+                    {3840, 2160},  // 4K UHD (if supported)
+                    {2560, 1440},  // QHD
+                };
+
+                for (int[] res : commonResolutions) {
+                    // Only add if different from current and reasonable for display size
+                    if ((res[0] != size.x || res[1] != size.y) &&
+                        res[0] <= size.x * 2 && res[1] <= size.y * 2) {
+                        Protocol.DisplayMode mode = new Protocol.DisplayMode();
+                        mode.width = res[0];
+                        mode.height = res[1];
+                        mode.refreshRate = refreshRateInt; // Use same refresh rate
+                        modeList.add(mode);
+                    }
+                }
+
+                Protocol.DisplayMode[] modes = modeList.toArray(new Protocol.DisplayMode[0]);
 
                 // Send HELLO with display name and modes
                 Protocol.sendHello(clientSocket.getOutputStream(), displayName, modes);
 
                 // Start frame receiver - use appropriate SurfaceHolder
-                // If TV is connected, we need to get the TV's SurfaceView holder
-                // For now, we'll use the phone's SurfaceView (it will be hidden if TV is connected)
-                // TODO: In the future, could create a Presentation for TV display
-                SurfaceHolder targetHolder = surfaceView.getHolder();
+                // If TV is connected, use TV's SurfaceView; otherwise use phone's SurfaceView
+                SurfaceHolder targetHolder;
+                if (tvSurfaceView != null && tvSurfaceView.getHolder() != null) {
+                    // TV is connected - use TV SurfaceView
+                    targetHolder = tvSurfaceView.getHolder();
+                } else {
+                    // No TV - use phone SurfaceView
+                    targetHolder = surfaceView.getHolder();
+                }
                 frameReceiver = new FrameReceiver(clientSocket, targetHolder, MainActivity.this);
                 frameReceiver.setConfigCallback(config -> {
                     // Handle config changes on main thread
@@ -351,6 +386,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         if (displayManager != null && displayListener != null) {
             displayManager.unregisterDisplayListener(displayListener);
         }
+        if (tvPresentation != null) {
+            tvPresentation.dismiss();
+            tvPresentation = null;
+        }
         stopListening();
     }
 
@@ -419,13 +458,38 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     private void updateDisplayVisibility() {
         boolean tvConnected = isTvConnected();
+        android.view.Display tvDisplay = getTargetDisplay();
 
-        // If TV is connected, hide the SurfaceView on phone
-        // If no TV, show the SurfaceView on phone
-        if (tvConnected) {
+        if (tvConnected && tvDisplay != null && tvDisplay.getDisplayId() != getWindowManager().getDefaultDisplay().getDisplayId()) {
+            // TV is connected - create Presentation on TV display
+            if (tvPresentation == null) {
+                tvPresentation = new TvPresentation(this, tvDisplay);
+                tvPresentation.show();
+                tvSurfaceView = tvPresentation.findViewById(R.id.tvSurfaceView);
+            }
+            // Hide phone SurfaceView
             surfaceView.setVisibility(android.view.View.GONE);
         } else {
+            // No TV - dismiss Presentation and show phone SurfaceView
+            if (tvPresentation != null) {
+                tvPresentation.dismiss();
+                tvPresentation = null;
+                tvSurfaceView = null;
+            }
             surfaceView.setVisibility(android.view.View.VISIBLE);
+        }
+    }
+
+    // Presentation class for TV display
+    private static class TvPresentation extends android.app.Presentation {
+        public TvPresentation(android.content.Context context, android.view.Display display) {
+            super(context, display);
+        }
+
+        @Override
+        protected void onCreate(android.os.Bundle savedInstanceState) {
+            super.onCreate(savedInstanceState);
+            setContentView(R.layout.presentation_tv);
         }
     }
 }
