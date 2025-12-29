@@ -5,6 +5,12 @@ client/build/
 client/app/build/
 client/.idea/
 client/local.properties
+tv-receiver/.gradle/
+tv-receiver/app/.cxx/
+tv-receiver/app/build/
+tv-receiver/.idea/
+tv-receiver/local.properties
+x11-streamer/build/
 
 # Compiled binaries
 *.o

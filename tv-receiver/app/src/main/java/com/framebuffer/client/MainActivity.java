@@ -166,54 +166,73 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 android.graphics.Point size = new android.graphics.Point();
                 targetDisplay.getRealSize(size);
 
-                // Get display name
-                String displayName = targetDisplay.getName();
-                if (displayName == null || displayName.isEmpty()) {
-                    if (isTvConnected()) {
-                        displayName = "TV Display";
-                    } else {
-                        displayName = "Phone Display";
-                    }
-                }
-
                 // Get refresh rate from target display
                 float refreshRate = targetDisplay.getRefreshRate();
                 int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
 
-                // Query all supported display modes from the target display
-                // Android doesn't provide a direct API for all modes, so we'll create
-                // a reasonable set based on the display's capabilities
-                java.util.ArrayList<Protocol.DisplayMode> modeList = new java.util.ArrayList<>();
+                String displayName = null;
+                Protocol.DisplayMode[] modes = null;
 
-                // Add current mode
-                Protocol.DisplayMode currentMode = new Protocol.DisplayMode();
-                currentMode.width = size.x;
-                currentMode.height = size.y;
-                currentMode.refreshRate = refreshRateInt;
-                modeList.add(currentMode);
+                // Try to get EDID information (Option 2: System Properties, Option 4: DRM)
+                byte[] edidData = null;
 
-                // Add common resolutions that the display likely supports
-                // (TVs typically support multiple resolutions)
-                int[][] commonResolutions = {
-                    {1920, 1080},  // Full HD
-                    {1280, 720},   // HD
-                    {3840, 2160},  // 4K UHD (if supported)
-                    {2560, 1440},  // QHD
-                };
+                // Option 4: Try to get EDID from DRM/KMS directly (most reliable)
+                try {
+                    edidData = EdidParser.getEdidFromDrm();
+                    if (edidData != null && edidData.length > 0) {
+                        android.util.Log.d("MainActivity", "Got EDID from DRM, size: " + edidData.length);
+                    }
+                } catch (Exception e) {
+                    android.util.Log.w("MainActivity", "Failed to get EDID from DRM: " + e.getMessage());
+                }
 
-                for (int[] res : commonResolutions) {
-                    // Only add if different from current and reasonable for display size
-                    if ((res[0] != size.x || res[1] != size.y) &&
-                        res[0] <= size.x * 2 && res[1] <= size.y * 2) {
-                        Protocol.DisplayMode mode = new Protocol.DisplayMode();
-                        mode.width = res[0];
-                        mode.height = res[1];
-                        mode.refreshRate = refreshRateInt; // Use same refresh rate
-                        modeList.add(mode);
+                // Option 2: Fallback to system properties
+                if (edidData == null || edidData.length == 0) {
+                    try {
+                        edidData = EdidParser.getEdidFromSystemProperties();
+                        if (edidData != null && edidData.length > 0) {
+                            android.util.Log.d("MainActivity", "Got EDID from system properties, size: " + edidData.length);
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w("MainActivity", "Failed to get EDID from system properties: " + e.getMessage());
                     }
                 }
 
-                Protocol.DisplayMode[] modes = modeList.toArray(new Protocol.DisplayMode[0]);
+                // Parse EDID if we got it
+                if (edidData != null && edidData.length > 0) {
+                    try {
+                        EdidParser.EdidInfo edidInfo = EdidParser.parseEdid(edidData);
+                        if (edidInfo != null && edidInfo.modes != null && edidInfo.modes.length > 0) {
+                            displayName = edidInfo.displayName;
+                            modes = edidInfo.modes;
+                            android.util.Log.d("MainActivity", "Parsed EDID: " + displayName + ", " + modes.length + " modes");
+                        }
+                    } catch (Exception e) {
+                        android.util.Log.w("MainActivity", "Failed to parse EDID: " + e.getMessage());
+                    }
+                }
+
+                // Fallback: Use only what Android provides (current mode only)
+                if (modes == null || modes.length == 0) {
+                    android.util.Log.d("MainActivity", "No EDID available, using current mode only");
+
+                    // Get display name from the target display
+                    displayName = targetDisplay.getName();
+                    if (displayName == null || displayName.isEmpty()) {
+                        if (isTvConnected()) {
+                            displayName = "TV Display";
+                        } else {
+                            displayName = "Phone Display";
+                        }
+                    }
+
+                    // Only report current mode (what we actually know)
+                    modes = new Protocol.DisplayMode[1];
+                    modes[0] = new Protocol.DisplayMode();
+                    modes[0].width = size.x;
+                    modes[0].height = size.y;
+                    modes[0].refreshRate = refreshRateInt;
+                }
 
                 // Send HELLO with display name and modes
                 Protocol.sendHello(clientSocket.getOutputStream(), displayName, modes);

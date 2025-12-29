@@ -14,6 +14,67 @@ android {
         versionName "1.0"
     }
 
+    // Conditionally enable native build if NDK is properly configured
+    def ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
+    def sdkDir = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+    def ndkPath = null
+
+    if (ndkHome) {
+        ndkPath = file(ndkHome)
+    } else if (sdkDir) {
+        ndkPath = file("${sdkDir}/ndk-bundle")
+        if (!ndkPath.exists()) {
+            // Try to find latest NDK version
+            def ndkDir = file("${sdkDir}/ndk")
+            if (ndkDir.exists()) {
+                def versions = ndkDir.listFiles().findAll { it.isDirectory() && new File(it, "source.properties").exists() }
+                if (!versions.isEmpty()) {
+                    ndkPath = versions.sort().last()
+                }
+            }
+        }
+    }
+
+    if (ndkPath != null && ndkPath.exists() && file("${ndkPath}/source.properties").exists()) {
+        println "NDK found at: ${ndkPath}"
+
+        // Set NDK version explicitly to avoid Gradle trying to use wrong version
+        android.ndkVersion = ndkPath.name
+
+        defaultConfig {
+            ndk {
+                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+            }
+
+            externalNativeBuild {
+                cmake {
+                    cppFlags "-std=c++17"
+                    arguments "-DANDROID_STL=c++_shared"
+                    // Explicitly set NDK path
+                    arguments "-DANDROID_NDK=${ndkPath.absolutePath}"
+                }
+            }
+        }
+
+        externalNativeBuild {
+            cmake {
+                path "src/main/cpp/CMakeLists.txt"
+                version "3.22.1"
+            }
+        }
+    } else {
+        println "NDK not properly configured - native EDID parsing from DRM will not be available"
+        println "App will still work using system properties for EDID (Option 2) and current mode only"
+    }
+
+    // Make native code optional - if NDK is not available, app will still work
+    // but EDID parsing from DRM will not be available
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
