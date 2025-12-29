@@ -4,12 +4,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define DEFAULT_TV_PORT 8888
+#define DEFAULT_TV_PORT 4321
 
 typedef struct x11_streamer x11_streamer_t;
 
+// Discovery options
+typedef struct {
+    bool use_broadcast;      // Use broadcast discovery (default: true)
+    const char *host;        // Direct host to connect to (if not NULL, disables broadcast)
+    int port;                // Port number (default: DEFAULT_TV_PORT)
+    int broadcast_timeout_ms; // Timeout for broadcast discovery in milliseconds (default: 5000)
+} streamer_discovery_options_t;
+
 // Create X11 streamer that connects to TV receiver
-x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port);
+// If options->host is NULL and options->use_broadcast is true, uses broadcast discovery
+// If options->host is set, connects directly to that host (broadcast disabled)
+x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options);
 void x11_streamer_destroy(x11_streamer_t *streamer);
 int x11_streamer_run(x11_streamer_t *streamer);
 void x11_streamer_stop(x11_streamer_t *streamer);

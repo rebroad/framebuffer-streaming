@@ -13,6 +13,10 @@ typedef enum {
     MSG_CONFIG = 0x05,
     MSG_PING = 0x06,
     MSG_PONG = 0x07,
+    MSG_DISCOVERY_REQUEST = 0x10,  // UDP broadcast discovery request
+    MSG_DISCOVERY_RESPONSE = 0x11, // UDP broadcast discovery response
+    MSG_PIN_VERIFY = 0x12,         // PIN verification request
+    MSG_PIN_VERIFIED = 0x13,       // PIN verification success
     MSG_ERROR = 0xFF
 } message_type_t;
 
@@ -86,6 +90,25 @@ typedef struct __attribute__((packed)) {
     uint32_t data_size;     // Size of audio data in bytes
     // Followed by audio data (PCM samples)
 } audio_message_t;
+
+// DISCOVERY_REQUEST message (UDP broadcast)
+// Empty payload - just the message header
+
+// DISCOVERY_RESPONSE message (UDP broadcast)
+typedef struct __attribute__((packed)) {
+    uint16_t tcp_port;      // TCP port for connection
+    uint16_t display_name_len;  // Length of display name
+    // Followed by:
+    // 1. Display name string (display_name_len bytes, null-terminated)
+} discovery_response_t;
+
+// PIN_VERIFY message (TCP, sent after connection)
+typedef struct __attribute__((packed)) {
+    uint16_t pin;           // PIN code to verify
+} pin_verify_t;
+
+// PIN_VERIFIED message (TCP, response to PIN_VERIFY)
+// Empty payload - just the message header
 
 int protocol_send_message(int fd, message_type_t type, const void *data, size_t data_len);
 int protocol_receive_message(int fd, message_header_t *header, void **payload);

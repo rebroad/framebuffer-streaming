@@ -13,6 +13,10 @@ public class Protocol {
     public static final byte MSG_CONFIG = 0x05;
     public static final byte MSG_PING = 0x06;
     public static final byte MSG_PONG = 0x07;
+    public static final byte MSG_DISCOVERY_REQUEST = 0x10;  // UDP broadcast discovery request
+    public static final byte MSG_DISCOVERY_RESPONSE = 0x11;  // UDP broadcast discovery response
+    public static final byte MSG_PIN_VERIFY = 0x12;         // PIN verification request
+    public static final byte MSG_PIN_VERIFIED = 0x13;        // PIN verification success
     public static final byte MSG_ERROR = (byte)0xFF;
 
     public static class MessageHeader {

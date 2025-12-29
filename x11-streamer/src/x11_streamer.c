@@ -17,9 +17,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <net/if.h>
+#include <ifaddrs.h>
 #include <pthread.h>
 #include <errno.h>
 #include <poll.h>
+#include <fcntl.h>
 
 typedef struct tv_connection {
     int fd;
@@ -33,6 +36,8 @@ struct x11_streamer {
     int tv_fd;  // Connection to TV receiver
     char *tv_host;
     int tv_port;
+    bool use_broadcast;  // Whether to use broadcast discovery
+    int broadcast_timeout_ms;  // Broadcast discovery timeout
     bool running;
     x11_context_t *x11_ctx;
     tv_connection_t *tv_conn;  // Single TV connection
@@ -56,11 +61,40 @@ static void *tv_receiver_thread(void *arg)
     void *payload = NULL;
 
     // TV receiver sends HELLO first
+    // Validate protocol by checking the first message
 
-    // Receive TV HELLO
+    // Receive TV HELLO with timeout to detect invalid protocols
+    struct pollfd pfd = {.fd = streamer->tv_fd, .events = POLLIN};
+    int poll_ret = poll(&pfd, 1, 2000);  // 2 second timeout
+    if (poll_ret <= 0) {
+        if (poll_ret == 0) {
+            fprintf(stderr, "TV receiver handshake timeout (no response or invalid protocol)\n");
+        } else {
+            perror("poll");
+        }
+        goto cleanup;
+    }
+
     int ret = protocol_receive_message(streamer->tv_fd, &header, &payload);
-    if (ret <= 0 || header.type != MSG_HELLO) {
-        printf("TV receiver handshake failed\n");
+    if (ret <= 0) {
+        fprintf(stderr, "TV receiver handshake failed: connection closed or invalid data\n");
+        goto cleanup;
+    }
+
+    // Validate protocol: must be MSG_HELLO
+    if (header.type != MSG_HELLO) {
+        fprintf(stderr, "TV receiver protocol mismatch: expected MSG_HELLO (0x%02x), got 0x%02x\n",
+                MSG_HELLO, header.type);
+        if (payload)
+            free(payload);
+        goto cleanup;
+    }
+
+    // Validate HELLO message structure
+    if (!payload || header.length < sizeof(hello_message_t)) {
+        fprintf(stderr, "TV receiver handshake failed: invalid HELLO message format\n");
+        if (payload)
+            free(payload);
         goto cleanup;
     }
 
@@ -657,14 +691,33 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
     }
 }
 
-x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
+x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
 {
     x11_streamer_t *streamer = calloc(1, sizeof(x11_streamer_t));
     if (!streamer)
         return NULL;
 
-    streamer->tv_host = strdup(tv_host ? tv_host : "localhost");
-    streamer->tv_port = tv_port;
+    // Set defaults if options not provided
+    streamer_discovery_options_t opts;
+    if (options) {
+        opts = *options;
+    } else {
+        opts.use_broadcast = true;
+        opts.host = NULL;
+        opts.port = DEFAULT_TV_PORT;
+        opts.broadcast_timeout_ms = 5000;
+    }
+
+    // If host is specified, disable broadcast
+    if (opts.host) {
+        streamer->tv_host = strdup(opts.host);
+        streamer->use_broadcast = false;
+    } else {
+        streamer->tv_host = NULL;
+        streamer->use_broadcast = opts.use_broadcast;
+    }
+    streamer->tv_port = opts.port;
+    streamer->broadcast_timeout_ms = opts.broadcast_timeout_ms;
     streamer->tv_fd = -1;
     streamer->x11_ctx = x11_context_create();
     if (!streamer->x11_ctx) {
@@ -680,7 +733,8 @@ x11_streamer_t *x11_streamer_create(const char *tv_host, int tv_port)
     if (!streamer->tv_conn) {
         x11_context_destroy(streamer->x11_ctx);
         pthread_mutex_destroy(&streamer->tv_mutex);
-        free(streamer->tv_host);
+        if (streamer->tv_host)
+            free(streamer->tv_host);
         free(streamer);
         return NULL;
     }
@@ -756,24 +810,243 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
     free(streamer);
 }
 
+// Discovery response structure
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    int tcp_port;
+    char display_name[256];
+} discovery_response_info_t;
+
+// Broadcast discovery: find TV receiver on all network interfaces using UDP
+static int discover_tv_receiver(x11_streamer_t *streamer, struct in_addr *found_addr, int *found_port)
+{
+    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_fd < 0) {
+        perror("socket(UDP)");
+        return -1;
+    }
+
+    // Enable broadcast
+    int broadcast = 1;
+    if (setsockopt(udp_fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) < 0) {
+        perror("setsockopt(SO_BROADCAST)");
+        close(udp_fd);
+        return -1;
+    }
+
+    // Bind to any port to receive responses
+    struct sockaddr_in listen_addr = {0};
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = INADDR_ANY;
+    listen_addr.sin_port = 0;  // Let system choose port
+    if (bind(udp_fd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
+        perror("bind(UDP)");
+        close(udp_fd);
+        return -1;
+    }
+
+    // Set timeout for receiving responses
+    struct timeval timeout;
+    timeout.tv_sec = streamer->broadcast_timeout_ms / 1000;
+    timeout.tv_usec = (streamer->broadcast_timeout_ms % 1000) * 1000;
+    if (setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt(SO_RCVTIMEO)");
+        close(udp_fd);
+        return -1;
+    }
+
+    // Build discovery request message
+    message_header_t request_header = {
+        .type = MSG_DISCOVERY_REQUEST,
+        .length = 0,
+        .sequence = 0
+    };
+
+    // Send broadcast on all interfaces
+    struct ifaddrs *ifaddrs_list = NULL;
+    if (getifaddrs(&ifaddrs_list) < 0) {
+        perror("getifaddrs");
+        close(udp_fd);
+        return -1;
+    }
+
+    printf("Sending UDP broadcast discovery requests (port 4321)...\n");
+
+    struct sockaddr_in broadcast_addr = {0};
+    broadcast_addr.sin_family = AF_INET;
+    broadcast_addr.sin_port = htons(4321);  // Default broadcast port
+
+    int sent_count = 0;
+    for (struct ifaddrs *ifa = ifaddrs_list; ifa != NULL; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK)
+            continue;
+        if (!(ifa->ifa_flags & IFF_UP))
+            continue;
+
+        struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+        struct in_addr if_addr = sin->sin_addr;
+
+        // Calculate broadcast address
+        if (ifa->ifa_netmask) {
+            struct sockaddr_in *netmask = (struct sockaddr_in *)ifa->ifa_netmask;
+            broadcast_addr.sin_addr.s_addr = (if_addr.s_addr & netmask->sin_addr.s_addr) |
+                                             ~(netmask->sin_addr.s_addr);
+        } else {
+            broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+        }
+
+        sendto(udp_fd, &request_header, sizeof(request_header), 0,
+               (struct sockaddr *)&broadcast_addr, sizeof(broadcast_addr));
+        sent_count++;
+    }
+    freeifaddrs(ifaddrs_list);
+
+    printf("Sent %d discovery requests, waiting for responses...\n", sent_count);
+
+    // Collect responses
+    discovery_response_info_t *responses = NULL;
+    int response_count = 0;
+    int response_capacity = 0;
+
+    while (1) {
+        uint8_t buffer[1024];
+        struct sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+
+        ssize_t n = recvfrom(udp_fd, buffer, sizeof(buffer), 0,
+                            (struct sockaddr *)&from_addr, &from_len);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                break;  // Timeout or interrupted
+            }
+            perror("recvfrom");
+            break;
+        }
+
+        if (n < 9) continue;  // Too short for header
+
+        message_header_t *header = (message_header_t *)buffer;
+        if (header->type != MSG_DISCOVERY_RESPONSE) continue;
+
+        // Parse discovery response
+        if (n < (ssize_t)(9 + sizeof(discovery_response_t))) continue;
+
+        discovery_response_t *resp = (discovery_response_t *)(buffer + 9);
+        uint16_t tcp_port = resp->tcp_port;
+        uint16_t name_len = resp->display_name_len;
+
+        if (n < (ssize_t)(9 + sizeof(discovery_response_t) + name_len)) continue;
+
+        char display_name[256] = {0};
+        if (name_len > 0 && name_len < sizeof(display_name)) {
+            memcpy(display_name, buffer + 9 + sizeof(discovery_response_t), name_len);
+        }
+
+        // Add to responses list
+        if (response_count >= response_capacity) {
+            response_capacity = response_capacity ? response_capacity * 2 : 8;
+            responses = realloc(responses, response_capacity * sizeof(discovery_response_info_t));
+        }
+
+        inet_ntop(AF_INET, &from_addr.sin_addr, responses[response_count].ip, INET_ADDRSTRLEN);
+        responses[response_count].tcp_port = tcp_port;
+        strncpy(responses[response_count].display_name, display_name, sizeof(responses[response_count].display_name) - 1);
+        response_count++;
+    }
+
+    close(udp_fd);
+
+    if (response_count == 0) {
+        printf("No TV receivers found.\n");
+        return -1;
+    }
+
+    // Display found receivers
+    printf("\nFound %d TV receiver(s):\n", response_count);
+    for (int i = 0; i < response_count; i++) {
+        printf("  %d. %s:%d - %s\n",
+               i + 1, responses[i].ip, responses[i].tcp_port,
+               responses[i].display_name[0] ? responses[i].display_name : "Unknown");
+    }
+
+    // Select receiver
+    int selected = 0;
+    if (response_count == 1) {
+        selected = 0;
+        printf("\nAuto-selecting the only receiver...\n");
+    } else {
+        printf("\nSelect receiver (1-%d): ", response_count);
+        fflush(stdout);
+        char line[32];
+        if (fgets(line, sizeof(line), stdin)) {
+            selected = atoi(line) - 1;
+            if (selected < 0 || selected >= response_count) {
+                printf("Invalid selection.\n");
+                free(responses);
+                return -1;
+            }
+        } else {
+            printf("No selection made.\n");
+            free(responses);
+            return -1;
+        }
+    }
+
+    // Set found address and port
+    if (inet_aton(responses[selected].ip, found_addr) == 0) {
+        printf("Invalid IP address: %s\n", responses[selected].ip);
+        free(responses);
+        return -1;
+    }
+    *found_port = responses[selected].tcp_port;
+
+    printf("Selected: %s:%d\n", responses[selected].ip, *found_port);
+    free(responses);
+    return 0;
+}
+
 int x11_streamer_run(x11_streamer_t *streamer)
 {
     if (!streamer)
         return -1;
 
-    // Connect to TV receiver
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(streamer->tv_port);
 
-    if (inet_aton(streamer->tv_host, &addr.sin_addr) == 0) {
-        // Try to resolve hostname
-        struct hostent *he = gethostbyname(streamer->tv_host);
-        if (!he) {
-            fprintf(stderr, "Failed to resolve host: %s\n", streamer->tv_host);
+    // Use broadcast discovery if enabled and no host specified
+    if (streamer->use_broadcast && !streamer->tv_host) {
+        struct in_addr found_addr;
+        int found_port;
+        if (discover_tv_receiver(streamer, &found_addr, &found_port) == 0) {
+            addr.sin_addr = found_addr;
+            addr.sin_port = htons(found_port);
+            streamer->tv_port = found_port;
+            char addr_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &found_addr, addr_str, sizeof(addr_str));
+            if (streamer->tv_host)
+                free(streamer->tv_host);
+            streamer->tv_host = strdup(addr_str);
+        } else {
+            fprintf(stderr, "TV receiver not found via broadcast discovery\n");
             return -1;
         }
-        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+    } else if (streamer->tv_host) {
+        // Direct connection to specified host
+        if (inet_aton(streamer->tv_host, &addr.sin_addr) == 0) {
+            // Try to resolve hostname
+            struct hostent *he = gethostbyname(streamer->tv_host);
+            if (!he) {
+                fprintf(stderr, "Failed to resolve host: %s\n", streamer->tv_host);
+                return -1;
+            }
+            memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+        }
+    } else {
+        fprintf(stderr, "No host specified and broadcast disabled\n");
+        return -1;
     }
 
     streamer->tv_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -782,7 +1055,9 @@ int x11_streamer_run(x11_streamer_t *streamer)
         return -1;
     }
 
-    printf("Connecting to TV receiver at %s:%d...\n", streamer->tv_host, streamer->tv_port);
+    char addr_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr.sin_addr, addr_str, sizeof(addr_str));
+    printf("Connecting to TV receiver at %s:%d...\n", addr_str, streamer->tv_port);
 
     if (connect(streamer->tv_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("connect");
@@ -792,6 +1067,41 @@ int x11_streamer_run(x11_streamer_t *streamer)
     }
 
     printf("Connected to TV receiver\n");
+
+    // Always prompt user for PIN (displayed on TV receiver screen)
+    printf("Enter PIN (4 digits, displayed on TV receiver): ");
+    fflush(stdout);
+    char pin_str[32];
+    if (!fgets(pin_str, sizeof(pin_str), stdin)) {
+        fprintf(stderr, "No PIN entered.\n");
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+    uint16_t pin = (uint16_t)atoi(pin_str);
+
+    // Send PIN verification
+    pin_verify_t pin_msg = {.pin = pin};
+    if (protocol_send_message(streamer->tv_fd, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
+        fprintf(stderr, "Failed to send PIN verification\n");
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    // Wait for PIN verified response
+    message_header_t header;
+    void *payload = NULL;
+    if (protocol_receive_message(streamer->tv_fd, &header, &payload) <= 0 ||
+        header.type != MSG_PIN_VERIFIED) {
+        fprintf(stderr, "PIN verification failed\n");
+        if (payload) free(payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+    if (payload) free(payload);
+    printf("PIN verified successfully\n");
 
     // Start TV receiver thread to handle communication
     streamer->running = true;

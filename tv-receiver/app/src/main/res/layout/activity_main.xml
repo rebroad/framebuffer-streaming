@@ -40,7 +40,7 @@
             android:layout_height="wrap_content"
             android:hint="Listen Port"
             android:inputType="number"
-            android:text="8888" />
+            android:text="4321" />
 
         <Button
             android:id="@+id/connectButton"
