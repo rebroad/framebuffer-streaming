@@ -328,6 +328,51 @@ RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
     return None;
 }
 
+void x11_context_set_virtual_output_modes(x11_context_t *ctx, RROutput output_id,
+                                          const int *widths, const int *heights,
+                                          const int *refresh_rates, int num_modes)
+{
+    if (!ctx || !ctx->display || output_id == None || !widths || !heights || !refresh_rates || num_modes <= 0)
+        return;
+
+    // Find the output
+    XRRScreenResources *res = XRRGetScreenResources(ctx->display, ctx->root);
+    if (!res)
+        return;
+
+    XRROutputInfo *output_info = XRRGetOutputInfo(ctx->display, res, output_id);
+    if (!output_info) {
+        XRRFreeScreenResources(res);
+        return;
+    }
+
+    // Build modes string: "WIDTH:HEIGHT:REFRESH|WIDTH:HEIGHT:REFRESH|..."
+    char modes_str[4096] = {0};
+    size_t pos = 0;
+    for (int i = 0; i < num_modes && pos < sizeof(modes_str) - 32; i++) {
+        if (i > 0) {
+            modes_str[pos++] = '|';
+        }
+        int n = snprintf(modes_str + pos, sizeof(modes_str) - pos, "%d:%d:%d",
+                         widths[i], heights[i], refresh_rates[i]);
+        if (n > 0 && (size_t)(pos + n) < sizeof(modes_str))
+            pos += n;
+    }
+
+    // Get XR_MODES atom
+    Atom modes_atom = get_atom(ctx->display, "XR_MODES");
+    if (modes_atom != None) {
+        // Set the property
+        XRRChangeOutputProperty(ctx->display, output_id, modes_atom,
+                               XA_STRING, 8, PropModeReplace,
+                               (unsigned char *)modes_str, strlen(modes_str));
+        XSync(ctx->display, False);
+    }
+
+    XRRFreeOutputInfo(output_info);
+    XRRFreeScreenResources(res);
+}
+
 void x11_context_delete_virtual_output(x11_context_t *ctx, RROutput output_id)
 {
     if (!ctx || !ctx->display || output_id == None)

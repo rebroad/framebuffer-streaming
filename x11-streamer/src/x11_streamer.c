@@ -132,6 +132,31 @@ static void *tv_receiver_thread(void *arg)
                 // Refresh outputs to get the new virtual output
                 x11_context_refresh_outputs(streamer->x11_ctx);
 
+                // Set all modes from TV receiver (not just the first one)
+                if (hello_msg->num_modes > 1) {
+                    int *widths = malloc(hello_msg->num_modes * sizeof(int));
+                    int *heights = malloc(hello_msg->num_modes * sizeof(int));
+                    int *refresh_rates = malloc(hello_msg->num_modes * sizeof(int));
+
+                    if (widths && heights && refresh_rates) {
+                        for (int i = 0; i < hello_msg->num_modes; i++) {
+                            widths[i] = modes[i].width;
+                            heights[i] = modes[i].height;
+                            refresh_rates[i] = modes[i].refresh_rate / 100;  // Convert from Hz*100 to Hz
+                        }
+
+                        x11_context_set_virtual_output_modes(streamer->x11_ctx, virtual_output_id,
+                                                            widths, heights, refresh_rates,
+                                                            hello_msg->num_modes);
+                        printf("Set %d modes for virtual output '%s'\n",
+                               hello_msg->num_modes, tv_display_name);
+
+                        free(widths);
+                        free(heights);
+                        free(refresh_rates);
+                    }
+                }
+
                 pthread_mutex_lock(&streamer->tv_mutex);
                 if (streamer->tv_conn) {
                     streamer->tv_conn->virtual_output_id = virtual_output_id;

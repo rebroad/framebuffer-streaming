@@ -40,6 +40,9 @@ output_info_t *x11_context_find_output(x11_context_t *ctx, RROutput output_id);
 void x11_context_free_outputs(x11_context_t *ctx);
 RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
                                             int width, int height, int refresh);
+void x11_context_set_virtual_output_modes(x11_context_t *ctx, RROutput output_id,
+                                          const int *widths, const int *heights,
+                                          const int *refresh_rates, int num_modes);
 void x11_context_delete_virtual_output(x11_context_t *ctx, RROutput output_id);
 int x11_context_get_fd(x11_context_t *ctx);
 int x11_context_process_events(x11_context_t *ctx);
