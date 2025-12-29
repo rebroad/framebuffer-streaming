@@ -24,11 +24,22 @@ typedef struct __attribute__((packed)) {
     uint32_t sequence;
 } message_header_t;
 
+// Display mode capability
+typedef struct __attribute__((packed)) {
+    uint32_t width;
+    uint32_t height;
+    uint32_t refresh_rate;  // Hz * 100 (e.g., 6000 = 60.00 Hz)
+} display_mode_t;
+
 // HELLO message
 typedef struct __attribute__((packed)) {
     uint16_t protocol_version;
     uint16_t client_type;  // 0=Android, 1=RaspberryPi
-    char capabilities[32];
+    uint16_t num_modes;    // Number of supported display modes
+    uint16_t display_name_len;  // Length of display name string
+    // Followed by:
+    // 1. Display name string (display_name_len bytes, null-terminated)
+    // 2. display_mode_t array (num_modes entries)
 } hello_message_t;
 
 // FRAME message

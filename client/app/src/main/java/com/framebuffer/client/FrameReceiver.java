@@ -2,7 +2,10 @@ package com.framebuffer.client;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.PorterDuff;
+import android.graphics.Typeface;
 import android.view.SurfaceHolder;
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,13 +14,27 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 public class FrameReceiver extends Thread {
+    public interface ConfigCallback {
+        void onConfigChanged(Protocol.ConfigMessage config);
+    }
+
     private Socket socket;
     private SurfaceHolder surfaceHolder;
     private boolean running = false;
+    private ConfigCallback configCallback;
+
+    // Current configuration state
+    private int currentWidth = 0;
+    private int currentHeight = 0;
+    private boolean connected = false;
 
     public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder) {
         this.socket = socket;
         this.surfaceHolder = surfaceHolder;
+    }
+
+    public void setConfigCallback(ConfigCallback callback) {
+        this.configCallback = callback;
     }
 
     public void stopReceiving() {
@@ -28,6 +45,7 @@ public class FrameReceiver extends Thread {
     @Override
     public void run() {
         running = true;
+        connected = true;  // Assume connected initially until we receive a CONFIG message saying otherwise
         try {
             InputStream in = socket.getInputStream();
 
@@ -46,17 +64,52 @@ public class FrameReceiver extends Thread {
 
                     Protocol.FrameMessage frame = Protocol.parseFrameMessage(frameData);
 
-                    // Read frame pixel data
-                    byte[] pixels = new byte[frame.size];
-                    read = 0;
-                    while (read < frame.size) {
-                        int n = in.read(pixels, read, frame.size - read);
+                    // Only process frames if display is connected
+                    if (connected && frame.width > 0 && frame.height > 0) {
+                        // Read frame pixel data
+                        byte[] pixels = new byte[frame.size];
+                        read = 0;
+                        while (read < frame.size) {
+                            int n = in.read(pixels, read, frame.size - read);
+                            if (n < 0) break;
+                            read += n;
+                        }
+
+                        // Draw to surface
+                        drawFrame(frame, pixels);
+                    } else {
+                        // Skip frame data if display is disconnected
+                        if (frame.size > 0) {
+                            in.skip(frame.size);
+                        }
+                    }
+
+                } else if (header.type == Protocol.MSG_CONFIG) {
+                    // Read config message
+                    byte[] configData = new byte[16]; // ConfigMessage size
+                    int read = 0;
+                    while (read < 16) {
+                        int n = in.read(configData, read, 16 - read);
                         if (n < 0) break;
                         read += n;
                     }
 
-                    // Draw to surface
-                    drawFrame(frame, pixels);
+                    Protocol.ConfigMessage config = Protocol.parseConfigMessage(configData);
+
+                    // Update state
+                    currentWidth = config.width;
+                    currentHeight = config.height;
+                    connected = (config.width > 0 && config.height > 0);
+
+                    // Notify callback
+                    if (configCallback != null) {
+                        configCallback.onConfigChanged(config);
+                    }
+
+                    // If disconnected, show "no signal" screen
+                    if (!connected) {
+                        drawNoSignal();
+                    }
 
                 } else if (header.type == Protocol.MSG_PING) {
                     // Respond to ping
@@ -102,6 +155,38 @@ public class FrameReceiver extends Thread {
 
             canvas.drawBitmap(bitmap, null,
                 new android.graphics.Rect(x, y, x + scaledWidth, y + scaledHeight), null);
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (canvas != null) {
+                surfaceHolder.unlockCanvasAndPost(canvas);
+            }
+        }
+    }
+
+    private void drawNoSignal() {
+        if (surfaceHolder == null) return;
+
+        Canvas canvas = null;
+        try {
+            canvas = surfaceHolder.lockCanvas();
+            if (canvas == null) return;
+
+            // Clear to black
+            canvas.drawColor(Color.BLACK);
+
+            // Draw "NO SIGNAL" text
+            Paint paint = new Paint();
+            paint.setColor(Color.WHITE);
+            paint.setTextSize(48);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTextAlign(Paint.Align.CENTER);
+
+            String text = "NO SIGNAL";
+            float x = canvas.getWidth() / 2.0f;
+            float y = canvas.getHeight() / 2.0f;
+            canvas.drawText(text, x, y, paint);
+
         } catch (Exception e) {
             e.printStackTrace();
         } finally {

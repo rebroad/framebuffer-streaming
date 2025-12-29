@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <X11/Xatom.h>
+#include <X11/extensions/Xrandr.h>
+#include <unistd.h>
+#include <poll.h>
 
 x11_context_t *x11_context_create(void)
 {
@@ -18,6 +21,27 @@ x11_context_t *x11_context_create(void)
 
     ctx->screen = DefaultScreen(ctx->display);
     ctx->root = RootWindow(ctx->display, ctx->screen);
+
+    // Initialize RandR extension
+    int rr_major, rr_minor;
+    if (!XRRQueryExtension(ctx->display, &ctx->rr_event_base, &ctx->rr_error_base)) {
+        printf("RandR extension not available\n");
+        XCloseDisplay(ctx->display);
+        free(ctx);
+        return NULL;
+    }
+
+    if (!XRRQueryVersion(ctx->display, &rr_major, &rr_minor)) {
+        printf("Failed to query RandR version\n");
+        XCloseDisplay(ctx->display);
+        free(ctx);
+        return NULL;
+    }
+
+    // Select RandR events to monitor output and CRTC changes
+    XRRSelectInput(ctx->display, ctx->root,
+                   RROutputChangeNotifyMask | RRCrtcChangeNotifyMask |
+                   RRScreenChangeNotifyMask);
 
     return ctx;
 }
@@ -127,12 +151,28 @@ int x11_context_refresh_outputs(x11_context_t *ctx)
         output_info_t *out = &ctx->outputs[idx];
         out->output_id = ctx->screen_resources->outputs[i];
         out->name = strdup(output_info->name);
-        out->connected = true;
-        out->width = output_info->mm_width;
-        out->height = output_info->mm_height;
+        out->connected = (output_info->connection == RR_Connected);
 
-        // Check if it's a virtual output (starts with "XR-")
-        out->is_virtual = (strncmp(output_info->name, "XR-", 3) == 0);
+        // Store previous state for change detection
+        output_info_t *prev_out = x11_context_find_output(ctx, out->output_id);
+        if (prev_out) {
+            out->prev_width = prev_out->width;
+            out->prev_height = prev_out->height;
+            out->prev_refresh_rate = prev_out->refresh_rate;
+            out->prev_connected = prev_out->connected;
+        } else {
+            out->prev_width = 0;
+            out->prev_height = 0;
+            out->prev_refresh_rate = 0;
+            out->prev_connected = false;
+        }
+
+        // Check if it's a virtual output (not a physical connector)
+        // Virtual outputs are created via CREATE_XR_OUTPUT, so they won't have
+        // standard physical connector names. We'll identify them by checking
+        // if they're not in the standard physical output list.
+        // For now, we'll check if it's NOT the XR-Manager output
+        out->is_virtual = (strcmp(output_info->name, "XR-Manager") != 0);
 
         // Get FRAMEBUFFER_ID property
         if (!get_output_property(ctx->display, out->output_id,
@@ -140,17 +180,11 @@ int x11_context_refresh_outputs(x11_context_t *ctx)
             out->framebuffer_id = 0;
         }
 
-        // Get PIXMAP_ID property (for virtual outputs)
-        if (out->is_virtual) {
-            if (!get_output_property(ctx->display, out->output_id,
-                                     "PIXMAP_ID", &out->pixmap_id)) {
-                out->pixmap_id = 0;
-            }
-        } else {
-            out->pixmap_id = 0;
-        }
+        // Get actual resolution and refresh rate from current mode
+        out->width = 0;
+        out->height = 0;
+        out->refresh_rate = 0;
 
-        // Get actual resolution from current mode
         if (output_info->crtc != None) {
             XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(ctx->display,
                                                     ctx->screen_resources,
@@ -158,6 +192,30 @@ int x11_context_refresh_outputs(x11_context_t *ctx)
             if (crtc_info) {
                 out->width = crtc_info->width;
                 out->height = crtc_info->height;
+
+                // Get refresh rate from current mode
+                if (crtc_info->mode != None) {
+                    for (int j = 0; j < output_info->nmode; j++) {
+                        if (output_info->modes[j] == crtc_info->mode) {
+                            // Mode ID found, get mode info
+                            XRRModeInfo *mode_info = NULL;
+                            for (int k = 0; k < ctx->screen_resources->nmode; k++) {
+                                if (ctx->screen_resources->modes[k].id == crtc_info->mode) {
+                                    mode_info = &ctx->screen_resources->modes[k];
+                                    break;
+                                }
+                            }
+                            if (mode_info && mode_info->hTotal > 0 && mode_info->vTotal > 0) {
+                                // Calculate refresh rate: (dot clock * 1000) / (hTotal * vTotal)
+                                double refresh = ((double)mode_info->dotClock * 1000.0) /
+                                                ((double)mode_info->hTotal * (double)mode_info->vTotal);
+                                out->refresh_rate = (int)(refresh + 0.5);  // Round to nearest Hz
+                            }
+                            break;
+                        }
+                    }
+                }
+
                 XRRFreeCrtcInfo(crtc_info);
             }
         }
@@ -198,3 +256,118 @@ void x11_context_free_outputs(x11_context_t *ctx)
     ctx->num_outputs = 0;
 }
 
+RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
+                                            int width, int height, int refresh)
+{
+    if (!ctx || !ctx->display || !name)
+        return None;
+
+    // Find the XR-Manager output
+    if (!ctx->screen_resources) {
+        ctx->screen_resources = XRRGetScreenResources(ctx->display, ctx->root);
+        if (!ctx->screen_resources)
+            return None;
+    }
+
+    RROutput manager_output = None;
+    for (int i = 0; i < ctx->screen_resources->noutput; i++) {
+        XRROutputInfo *output_info = XRRGetOutputInfo(ctx->display,
+                                                       ctx->screen_resources,
+                                                       ctx->screen_resources->outputs[i]);
+        if (output_info && strcmp(output_info->name, "XR-Manager") == 0) {
+            manager_output = ctx->screen_resources->outputs[i];
+            XRRFreeOutputInfo(output_info);
+            break;
+        }
+        if (output_info)
+            XRRFreeOutputInfo(output_info);
+    }
+
+    if (manager_output == None) {
+        printf("XR-Manager output not found\n");
+        return None;
+    }
+
+    // Create virtual output by setting CREATE_XR_OUTPUT property
+    // Format: "NAME:WIDTH:HEIGHT[:REFRESH]"
+    char create_cmd[256];
+    if (refresh > 0) {
+        snprintf(create_cmd, sizeof(create_cmd), "%s:%d:%d:%d", name, width, height, refresh);
+    } else {
+        snprintf(create_cmd, sizeof(create_cmd), "%s:%d:%d", name, width, height);
+    }
+
+    Atom create_atom = get_atom(ctx->display, "CREATE_XR_OUTPUT");
+    if (create_atom == None) {
+        printf("CREATE_XR_OUTPUT atom not found\n");
+        return None;
+    }
+
+    // Set the property to trigger virtual output creation
+    XRRChangeOutputProperty(ctx->display, manager_output, create_atom,
+                           XA_STRING, 8, PropModeReplace,
+                           (unsigned char *)create_cmd, strlen(create_cmd));
+
+    XSync(ctx->display, False);
+
+    // Wait a bit for the output to be created, then refresh outputs
+    usleep(100000);  // 100ms
+    x11_context_refresh_outputs(ctx);
+
+    // Find the newly created output
+    for (int i = 0; i < ctx->num_outputs; i++) {
+        if (ctx->outputs[i].is_virtual &&
+            strncmp(ctx->outputs[i].name, name, strlen(name)) == 0) {
+            printf("Created virtual output: %s (%dx%d@%dHz)\n",
+                   ctx->outputs[i].name, width, height, refresh);
+            return ctx->outputs[i].output_id;
+        }
+    }
+
+    printf("Virtual output created but not found after refresh\n");
+    return None;
+}
+
+int x11_context_get_fd(x11_context_t *ctx)
+{
+    if (!ctx || !ctx->display)
+        return -1;
+    return ConnectionNumber(ctx->display);
+}
+
+int x11_context_process_events(x11_context_t *ctx)
+{
+    if (!ctx || !ctx->display)
+        return -1;
+
+    // Check if events are available
+    if (XPending(ctx->display) == 0)
+        return 0;
+
+    XEvent event;
+    bool output_changed = false;
+
+    while (XCheckTypedEvent(ctx->display, ctx->rr_event_base + RRScreenChangeNotify, &event) ||
+           XCheckTypedEvent(ctx->display, ctx->rr_event_base + RRNotify, &event)) {
+
+        if (event.type == ctx->rr_event_base + RRScreenChangeNotify) {
+            // Screen configuration changed
+            output_changed = true;
+        } else if (event.type == ctx->rr_event_base + RRNotify) {
+            XRRNotifyEvent *rr_event = (XRRNotifyEvent *)&event;
+
+            if (rr_event->subtype == RRNotify_OutputChange ||
+                rr_event->subtype == RRNotify_CrtcChange) {
+                output_changed = true;
+            }
+        }
+    }
+
+    // Refresh outputs if changes detected
+    if (output_changed) {
+        x11_context_refresh_outputs(ctx);
+        return 1;  // Indicate changes detected
+    }
+
+    return 0;
+}

@@ -80,18 +80,62 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 socket = new Socket(address, port);
                 connected = true;
 
-                // Send HELLO
-                byte[] hello = new byte[36];
-                java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(hello).order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                buf.putShort((short)1); // protocol version
-                buf.putShort((short)0); // client type: Android
-                // capabilities (32 bytes, all zeros for now)
+                // Query display capabilities
+                android.view.Display display = getWindowManager().getDefaultDisplay();
+                android.graphics.Point size = new android.graphics.Point();
+                display.getRealSize(size);
 
-                socket.getOutputStream().write(new byte[]{Protocol.MSG_HELLO, 0, 0, 0, 36, 0, 0, 0, 0});
-                socket.getOutputStream().write(hello);
+                // Get display name
+                String displayName = "Unknown Display";
+                try {
+                    android.hardware.display.DisplayManager dm =
+                        (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+                    android.view.Display[] displays = dm.getDisplays();
+                    if (displays.length > 0) {
+                        android.view.Display d = displays[0];
+                        // Try to get display name from system properties or display info
+                        displayName = d.getName();
+                        if (displayName == null || displayName.isEmpty()) {
+                            displayName = "Android Display";
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                // Get refresh rate
+                float refreshRate = display.getRefreshRate();
+                int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
+
+                // Create display modes (for now, just the current resolution)
+                Protocol.DisplayMode[] modes = new Protocol.DisplayMode[1];
+                modes[0] = new Protocol.DisplayMode();
+                modes[0].width = size.x;
+                modes[0].height = size.y;
+                modes[0].refreshRate = refreshRateInt;
+
+                // Send HELLO with display name and modes
+                Protocol.sendHello(socket.getOutputStream(), displayName, modes);
 
                 // Start frame receiver
                 frameReceiver = new FrameReceiver(socket, surfaceView.getHolder());
+                frameReceiver.setConfigCallback(config -> {
+                    // Handle config changes on main thread
+                    new Handler(Looper.getMainLooper()).post(() -> {
+                        if (config.width == 0 || config.height == 0) {
+                            // Display disconnected
+                            Toast.makeText(MainActivity.this,
+                                "Display disconnected (no signal)",
+                                Toast.LENGTH_SHORT).show();
+                        } else {
+                            // Display resolution changed
+                            Toast.makeText(MainActivity.this,
+                                String.format("Resolution changed: %dx%d@%dHz",
+                                    config.width, config.height, config.refreshRate),
+                                Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                });
                 frameReceiver.start();
 
                 new Handler(Looper.getMainLooper()).post(() -> {

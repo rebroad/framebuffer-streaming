@@ -75,8 +75,7 @@ Multiple client implementations:
   - Use `drmModeGetFB()` → `drmPrimeHandleToFD()` to export DMA-BUF FD (zero-copy, proven approach)
   - This unified approach works for both virtual and standard outputs
 - **Alternative method (if FRAMEBUFFER_ID not available)**:
-  - Query `PIXMAP_ID` property (virtual outputs only) and use DRI3 `DRI3BufferFromPixmap` protocol
-  - Or use root window pixmap via X11 extensions (XShm, XFixes)
+  - Use root window pixmap via X11 extensions (XShm, XFixes) as fallback
 - Use DMA-BUF FDs for zero-copy access (preferred method)
 - Fall back to CPU mapping via `drmModeMapDumb()` only for dumb buffers (non-GBM path)
 - Handle format conversion if needed
