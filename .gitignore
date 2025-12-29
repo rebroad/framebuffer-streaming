@@ -24,3 +24,6 @@ client/local.properties
 .DS_Store
 Thumbs.db
 
+build/
+.gradle/
+*.lock
