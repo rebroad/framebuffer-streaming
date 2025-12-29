@@ -22,6 +22,17 @@ public class Protocol {
         public int sequence;
     }
 
+    // Encoding modes
+    public static final byte ENCODING_MODE_FULL_FRAME = 0;
+    public static final byte ENCODING_MODE_DIRTY_RECTS = 1;
+    public static final byte ENCODING_MODE_H264 = 2;
+
+    public static class DirtyRectangle {
+        public int x, y;
+        public int width, height;
+        public int dataSize;
+    }
+
     public static class FrameMessage {
         public long timestampUs;  // Timestamp for synchronization
         public int outputId;
@@ -30,6 +41,8 @@ public class Protocol {
         public int format;
         public int pitch;
         public int size;
+        public byte encodingMode;  // 0=full frame, 1=dirty rectangles, 2=H.264
+        public byte numRegions;   // Number of dirty rectangles (if encodingMode=1)
     }
 
     public static class AudioMessage {
@@ -125,7 +138,26 @@ public class Protocol {
         frame.format = buf.getInt();
         frame.pitch = buf.getInt();
         frame.size = buf.getInt();
+        if (buf.remaining() >= 2) {
+            frame.encodingMode = buf.get();
+            frame.numRegions = buf.get();
+        } else {
+            // Backward compatibility: default to full frame
+            frame.encodingMode = ENCODING_MODE_FULL_FRAME;
+            frame.numRegions = 0;
+        }
         return frame;
+    }
+
+    public static DirtyRectangle parseDirtyRectangle(byte[] data) {
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        DirtyRectangle rect = new DirtyRectangle();
+        rect.x = buf.getInt();
+        rect.y = buf.getInt();
+        rect.width = buf.getInt();
+        rect.height = buf.getInt();
+        rect.dataSize = buf.getInt();
+        return rect;
     }
 
     public static AudioMessage parseAudioMessage(byte[] data) {

@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 public class FrameReceiver extends Thread {
     public interface ConfigCallback {
@@ -30,6 +31,7 @@ public class FrameReceiver extends Thread {
     private int currentHeight = 0;
     private boolean connected = false;
     private float savedBrightness = -1.0f;  // Store original brightness
+    private Bitmap currentFrameBitmap;  // Store current frame for dirty rectangle compositing
 
     public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder, android.content.Context context) {
         this.socket = socket;
@@ -61,11 +63,11 @@ public class FrameReceiver extends Thread {
                 Protocol.MessageHeader header = Protocol.receiveHeader(in);
 
                 if (header.type == Protocol.MSG_FRAME) {
-                    // Read frame message (now 32 bytes with timestamp)
-                    byte[] frameData = new byte[32]; // FrameMessage size
+                    // Read frame message (now 34 bytes: 32 + encoding_mode + num_regions)
+                    byte[] frameData = new byte[34]; // FrameMessage size
                     int read = 0;
-                    while (read < 32) {
-                        int n = in.read(frameData, read, 32 - read);
+                    while (read < 34) {
+                        int n = in.read(frameData, read, 34 - read);
                         if (n < 0) break;
                         read += n;
                     }
@@ -74,17 +76,22 @@ public class FrameReceiver extends Thread {
 
                     // Only process frames if display is connected
                     if (connected && frame.width > 0 && frame.height > 0) {
-                        // Read frame pixel data
-                        byte[] pixels = new byte[frame.size];
-                        read = 0;
-                        while (read < frame.size) {
-                            int n = in.read(pixels, read, frame.size - read);
-                            if (n < 0) break;
-                            read += n;
-                        }
+                        if (frame.encodingMode == Protocol.ENCODING_MODE_DIRTY_RECTS && frame.numRegions > 0) {
+                            // Handle dirty rectangles
+                            drawDirtyRectangles(frame, in);
+                        } else {
+                            // Handle full frame (backward compatible)
+                            byte[] pixels = new byte[frame.size];
+                            read = 0;
+                            while (read < frame.size) {
+                                int n = in.read(pixels, read, frame.size - read);
+                                if (n < 0) break;
+                                read += n;
+                            }
 
-                        // Draw to surface
-                        drawFrame(frame, pixels);
+                            // Draw to surface
+                            drawFrame(frame, pixels);
+                        }
                     } else {
                         // Skip frame data if display is disconnected
                         if (frame.size > 0) {
@@ -173,6 +180,80 @@ public class FrameReceiver extends Thread {
             }
         } catch (IOException e) {
             e.printStackTrace();
+        }
+    }
+
+    private void drawDirtyRectangles(Protocol.FrameMessage frame, InputStream in) {
+        if (surfaceHolder == null) return;
+
+        Canvas canvas = null;
+        try {
+            canvas = surfaceHolder.lockCanvas();
+            if (canvas == null) return;
+
+            // Initialize or resize frame bitmap if needed
+            if (currentFrameBitmap == null ||
+                currentFrameBitmap.getWidth() != frame.width ||
+                currentFrameBitmap.getHeight() != frame.height) {
+                if (currentFrameBitmap != null) {
+                    currentFrameBitmap.recycle();
+                }
+                currentFrameBitmap = Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888);
+                // Clear to black initially
+                currentFrameBitmap.eraseColor(Color.BLACK);
+            }
+
+            // Read and draw each dirty rectangle
+            Canvas frameCanvas = new Canvas(currentFrameBitmap);
+            for (int i = 0; i < frame.numRegions; i++) {
+                // Read rectangle header (20 bytes)
+                byte[] rectData = new byte[20];
+                int read = 0;
+                while (read < 20) {
+                    int n = in.read(rectData, read, 20 - read);
+                    if (n < 0) break;
+                    read += n;
+                }
+
+                Protocol.DirtyRectangle rect = Protocol.parseDirtyRectangle(rectData);
+
+                // Read rectangle pixel data
+                byte[] rectPixels = new byte[rect.dataSize];
+                read = 0;
+                while (read < rect.dataSize) {
+                    int n = in.read(rectPixels, read, rect.dataSize - read);
+                    if (n < 0) break;
+                    read += n;
+                }
+
+                // Convert rectangle pixels to Bitmap
+                Bitmap rectBitmap = Bitmap.createBitmap(rect.width, rect.height, Bitmap.Config.ARGB_8888);
+                int[] pixelArray = new int[rect.width * rect.height];
+                ByteBuffer.wrap(rectPixels).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(pixelArray);
+                rectBitmap.setPixels(pixelArray, 0, rect.width, 0, 0, rect.width, rect.height);
+
+                // Update the stored frame bitmap with this rectangle
+                frameCanvas.drawBitmap(rectBitmap, rect.x, rect.y, null);
+            }
+
+            // Draw the complete updated frame to surface
+            float scaleX = (float)canvas.getWidth() / frame.width;
+            float scaleY = (float)canvas.getHeight() / frame.height;
+            float scale = Math.min(scaleX, scaleY);
+
+            int scaledWidth = (int)(frame.width * scale);
+            int scaledHeight = (int)(frame.height * scale);
+            int x = (canvas.getWidth() - scaledWidth) / 2;
+            int y = (canvas.getHeight() - scaledHeight) / 2;
+
+            canvas.drawBitmap(currentFrameBitmap, null,
+                new android.graphics.Rect(x, y, x + scaledWidth, y + scaledHeight), null);
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            if (canvas != null) {
+                surfaceHolder.unlockCanvasAndPost(canvas);
+            }
         }
     }
 
