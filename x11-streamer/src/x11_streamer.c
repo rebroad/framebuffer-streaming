@@ -184,8 +184,8 @@ static void *tv_receiver_thread(void *arg)
             break;
 
         case MSG_INPUT:
-            // TODO: Forward input to X server
-            printf("Received input message from TV receiver\n");
+            // Input forwarding not implemented (out of scope - Android app is display-only)
+            printf("Received input message from TV receiver (ignored - input forwarding not implemented)\n");
             break;
 
         default:

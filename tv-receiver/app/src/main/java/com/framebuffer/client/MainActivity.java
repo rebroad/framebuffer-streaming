@@ -67,17 +67,23 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private void startListening() {
         String portStr = listenPortEdit.getText().toString().trim();
 
-        if (portStr.isEmpty()) {
-            Toast.makeText(this, "Please enter listen port", Toast.LENGTH_SHORT).show(); // TODO jus pick a spare port, and display this on the TV until the server has connected to it.
-            return;
-        }
-
         int port;
-        try {
-            port = Integer.parseInt(portStr);
-        } catch (NumberFormatException e) {
-            Toast.makeText(this, "Invalid port number", Toast.LENGTH_SHORT).show();
-            return;
+        if (portStr.isEmpty()) {
+            // Auto-pick an available port
+            port = findAvailablePort();
+            if (port == -1) {
+                Toast.makeText(this, "Could not find available port", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            // Update the edit text with the selected port
+            listenPortEdit.setText(String.valueOf(port));
+        } else {
+            try {
+                port = Integer.parseInt(portStr);
+            } catch (NumberFormatException e) {
+                Toast.makeText(this, "Invalid port number", Toast.LENGTH_SHORT).show();
+                return;
+            }
         }
 
         listening = true;
@@ -91,17 +97,41 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // Get local IP address for display
                 String localIp = getLocalIpAddress();
 
+                // Update status text
                 new Handler(Looper.getMainLooper()).post(() -> {
+                    statusText.setText("Listening on " + localIp + ":" + port);
                     Toast.makeText(MainActivity.this,
                         "Listening on port " + port + "\nIP: " + localIp,
                         Toast.LENGTH_LONG).show();
+                    // Display connection info on TV
+                    displayConnectionInfoOnTV(port, localIp);
                 });
 
                 // Wait for X11 server to connect
                 clientSocket = serverSocket.accept();
 
                 new Handler(Looper.getMainLooper()).post(() -> {
+                    statusText.setText("Connected to X11 streamer");
                     Toast.makeText(MainActivity.this, "X11 server connected", Toast.LENGTH_SHORT).show();
+                    // Clear the connection info from TV (frame receiver will start drawing)
+                    SurfaceHolder holder = surfaceView.getHolder();
+                    android.graphics.Canvas canvas = null;
+                    try {
+                        canvas = holder.lockCanvas();
+                        if (canvas != null) {
+                            canvas.drawColor(android.graphics.Color.BLACK);
+                            holder.unlockCanvasAndPost(canvas);
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        if (canvas != null) {
+                            try {
+                                holder.unlockCanvasAndPost(canvas);
+                            } catch (Exception e2) {
+                                e2.printStackTrace();
+                            }
+                        }
+                    }
                 });
 
                 // Query display capabilities
@@ -173,6 +203,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 new Handler(Looper.getMainLooper()).post(() -> {
                     startStopButton.setText("Start Listening");
                     listenPortEdit.setEnabled(true);
+                    statusText.setText("Not listening");
                 });
             }
         });
@@ -219,6 +250,20 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         Toast.makeText(this, "Stopped listening", Toast.LENGTH_SHORT).show();
     }
 
+    private int findAvailablePort() {
+        // Try ports from 8888 to 8999
+        for (int port = 8888; port <= 8999; port++) {
+            try {
+                java.net.ServerSocket testSocket = new java.net.ServerSocket(port);
+                testSocket.close();
+                return port;
+            } catch (IOException e) {
+                // Port is in use, try next
+            }
+        }
+        return -1;
+    }
+
     private String getLocalIpAddress() {
         try {
             java.util.Enumeration<java.net.NetworkInterface> interfaces =
@@ -237,6 +282,45 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             e.printStackTrace();
         }
         return "Unknown";
+    }
+
+    private void displayConnectionInfoOnTV(int port, String ip) {
+        // Draw connection info on the SurfaceView so it's visible on TV
+        SurfaceHolder holder = surfaceView.getHolder();
+        android.graphics.Canvas canvas = null;
+        try {
+            canvas = holder.lockCanvas();
+            if (canvas != null) {
+                canvas.drawColor(android.graphics.Color.BLACK);
+
+                android.graphics.Paint paint = new android.graphics.Paint();
+                paint.setColor(android.graphics.Color.WHITE);
+                paint.setTextSize(60);
+                paint.setAntiAlias(true);
+                paint.setTextAlign(android.graphics.Paint.Align.CENTER);
+
+                int centerX = canvas.getWidth() / 2;
+                int y = canvas.getHeight() / 2 - 100;
+
+                canvas.drawText("Waiting for X11 streamer...", centerX, y, paint);
+                y += 80;
+                paint.setTextSize(48);
+                canvas.drawText("IP: " + ip, centerX, y, paint);
+                y += 60;
+                canvas.drawText("Port: " + port, centerX, y, paint);
+
+                holder.unlockCanvasAndPost(canvas);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            if (canvas != null) {
+                try {
+                    holder.unlockCanvasAndPost(canvas);
+                } catch (Exception e2) {
+                    e2.printStackTrace();
+                }
+            }
+        }
     }
 
     @Override

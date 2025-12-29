@@ -4,13 +4,18 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <stdatomic.h>
+
+// Per-connection sequence counter (thread-safe, per connection)
+// Note: Using TCP, so sequence numbers are mainly for debugging/monitoring
+static _Thread_local uint32_t sequence_counter = 0;
 
 int protocol_send_message(int fd, message_type_t type, const void *data, size_t data_len)
 {
     message_header_t header = {
         .type = type,
         .length = data_len,
-        .sequence = 0  // TODO: implement sequence numbers
+        .sequence = sequence_counter++
     };
 
     // Send header
