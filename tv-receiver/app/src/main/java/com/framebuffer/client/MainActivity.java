@@ -19,6 +19,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private FrameReceiver frameReceiver;
     private boolean listening = false;
     private Thread serverThread;
+    private NoiseEncryption currentNoiseEncryption;  // Current Noise encryption context for active connection
     private android.hardware.display.DisplayManager displayManager;
     private android.hardware.display.DisplayManager.DisplayListener displayListener;
     private android.app.Presentation tvPresentation;
@@ -117,25 +118,21 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         acceptedSocket = serverSocket.accept();
                         clientSocket = acceptedSocket;
 
-                        // Verify PIN before proceeding
-                        if (!verifyPinFromClient(acceptedSocket)) {
-                            android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
-                            acceptedSocket.close();
-                            continue; // Continue listening for next connection
-                        }
-
-                        // Perform Noise Protocol handshake for encrypted communication
+                        // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
                         NoiseEncryption noiseEncryption = new NoiseEncryption(false);  // Receiver is responder
+                        currentNoiseEncryption = noiseEncryption;  // Store for use in verifyPinFromClient
                         try {
                             if (!noiseEncryption.handshake(acceptedSocket)) {
                                 android.util.Log.e("MainActivity", "Noise Protocol handshake failed");
                                 noiseEncryption.cleanup();
+                                currentNoiseEncryption = null;
                                 acceptedSocket.close();
                                 continue; // Continue listening for next connection
                             }
                             if (!noiseEncryption.isReady()) {
                                 android.util.Log.e("MainActivity", "Noise Protocol handshake incomplete");
                                 noiseEncryption.cleanup();
+                                currentNoiseEncryption = null;
                                 acceptedSocket.close();
                                 continue; // Continue listening for next connection
                             }
@@ -143,6 +140,16 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         } catch (IOException e) {
                             android.util.Log.e("MainActivity", "Noise Protocol handshake error", e);
                             noiseEncryption.cleanup();
+                            currentNoiseEncryption = null;
+                            acceptedSocket.close();
+                            continue; // Continue listening for next connection
+                        }
+
+                        // Now verify PIN over encrypted channel
+                        if (!verifyPinFromClient(acceptedSocket, noiseEncryption)) {
+                            android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
+                            noiseEncryption.cleanup();
+                            currentNoiseEncryption = null;
                             acceptedSocket.close();
                             continue; // Continue listening for next connection
                         }
@@ -244,8 +251,16 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             modes[0].refreshRate = refreshRateInt;
                         }
 
-                        // Send HELLO with display name and modes
-                        Protocol.sendHello(acceptedSocket.getOutputStream(), displayName, modes);
+                        // Send HELLO with display name and modes (encrypted)
+                        if (noiseEncryption != null && noiseEncryption.isReady()) {
+                            // Build HELLO message
+                            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                            Protocol.sendHello(baos, displayName, modes);
+                            noiseEncryption.send(acceptedSocket, baos.toByteArray());
+                        } else {
+                            // Fallback to unencrypted (should not happen)
+                            Protocol.sendHello(acceptedSocket.getOutputStream(), displayName, modes);
+                        }
 
                         // Start frame receiver - use appropriate SurfaceHolder
                         // If TV is connected, use TV's SurfaceView; otherwise use phone's SurfaceView
@@ -257,7 +272,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             // No TV - use phone SurfaceView
                             targetHolder = surfaceView.getHolder();
                         }
-                        frameReceiver = new FrameReceiver(acceptedSocket, targetHolder, MainActivity.this);
+                        frameReceiver = new FrameReceiver(acceptedSocket, targetHolder, MainActivity.this, noiseEncryption);
                         frameReceiver.setConfigCallback(config -> {
                             // Handle config changes on main thread
                             new Handler(Looper.getMainLooper()).post(() -> {
@@ -460,48 +475,74 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         }
     }
 
-    private boolean verifyPinFromClient(Socket socket) {
+    private boolean verifyPinFromClient(Socket socket, NoiseEncryption noiseEncryption) {
         try {
             java.io.InputStream in = socket.getInputStream();
             java.io.OutputStream out = socket.getOutputStream();
 
-            // Read PIN verification message
-            byte[] header = new byte[9];
-            int read = 0;
-            while (read < 9) {
-                int n = in.read(header, read, 9 - read);
-                if (n < 0) return false;
-                read += n;
+            // Read PIN verification message header (encrypted)
+            byte[] headerBytes;
+            if (noiseEncryption != null && noiseEncryption.isReady()) {
+                // Read encrypted header
+                headerBytes = noiseEncryption.recv(socket, 9);
+                if (headerBytes == null || headerBytes.length != 9) {
+                    return false;
+                }
+            } else {
+                // Fallback to unencrypted (should not happen after handshake)
+                headerBytes = new byte[9];
+                int read = 0;
+                while (read < 9) {
+                    int n = in.read(headerBytes, read, 9 - read);
+                    if (n < 0) return false;
+                    read += n;
+                }
             }
 
-            if (header[0] != Protocol.MSG_PIN_VERIFY) {
+            if (headerBytes[0] != Protocol.MSG_PIN_VERIFY) {
                 return false;
             }
 
-            // Read PIN
-            int length = (header[1] & 0xFF) | ((header[2] & 0xFF) << 8) |
-                         ((header[3] & 0xFF) << 16) | ((header[4] & 0xFF) << 24);
+            // Read PIN (encrypted)
+            int length = (headerBytes[1] & 0xFF) | ((headerBytes[2] & 0xFF) << 8) |
+                         ((headerBytes[3] & 0xFF) << 16) | ((headerBytes[4] & 0xFF) << 24);
             if (length < 2) return false;
 
-            byte[] pinData = new byte[2];
-            read = 0;
-            while (read < 2) {
-                int n = in.read(pinData, read, 2 - read);
-                if (n < 0) return false;
-                read += n;
+            byte[] pinData;
+            if (noiseEncryption != null && noiseEncryption.isReady()) {
+                pinData = noiseEncryption.recv(socket, 2);
+                if (pinData == null || pinData.length != 2) {
+                    return false;
+                }
+            } else {
+                // Fallback to unencrypted
+                pinData = new byte[2];
+                int read = 0;
+                while (read < 2) {
+                    int n = in.read(pinData, read, 2 - read);
+                    if (n < 0) return false;
+                    read += n;
+                }
             }
 
             int receivedPin = (pinData[0] & 0xFF) | ((pinData[1] & 0xFF) << 8);
 
             // Verify PIN
             if (receivedPin == pinCode) {
-                // Send PIN verified response
+                // Send PIN verified response (encrypted)
                 java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
                 baos.write(Protocol.MSG_PIN_VERIFIED);
                 baos.write(new byte[4]);  // Length = 0
                 baos.write(new byte[4]);  // Sequence = 0
-                out.write(baos.toByteArray());
-                out.flush();
+                byte[] response = baos.toByteArray();
+
+                if (noiseEncryption != null && noiseEncryption.isReady()) {
+                    noiseEncryption.send(socket, response);
+                } else {
+                    // Fallback to unencrypted
+                    out.write(response);
+                    out.flush();
+                }
                 return true;
             } else {
                 return false;

@@ -5,6 +5,7 @@
 #include "audio_capture.h"
 #include "dirty_rect.h"
 #include "encoding_metrics.h"
+#include "noise_encryption.h"
 #ifdef HAVE_X264
 #include "h264_encoder.h"
 #endif
@@ -49,6 +50,7 @@ struct x11_streamer {
     dirty_rect_context_t *dirty_rect_ctx;  // For dirty rectangle detection
     uint8_t encoding_mode;  // Current encoding mode (0=full, 1=dirty rects, 2=H.264)
     encoding_metrics_t *metrics;  // Metrics for adaptive switching
+    noise_encryption_context_t *noise_ctx;  // Noise Protocol encryption context
 #ifdef HAVE_X264
     h264_encoder_t *h264_encoder;  // H.264 encoder (when mode=2)
 #endif
@@ -800,6 +802,11 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
         x11_context_delete_virtual_output(streamer->x11_ctx, streamer->tv_conn->virtual_output_id);
     }
 
+    if (streamer->noise_ctx) {
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
+    }
+
     if (streamer->tv_fd >= 0)
         close(streamer->tv_fd);
 
@@ -1087,34 +1094,69 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
     printf("Connected to TV receiver\n");
 
-    // Always prompt user for PIN (displayed on TV receiver screen)
+    // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
+    streamer->noise_ctx = noise_encryption_init(true);  // Streamer is initiator
+    if (!streamer->noise_ctx) {
+        fprintf(stderr, "Failed to initialize Noise Protocol encryption\n");
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    if (noise_encryption_handshake(streamer->noise_ctx, streamer->tv_fd) < 0) {
+        fprintf(stderr, "Noise Protocol handshake failed\n");
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    if (!noise_encryption_is_ready(streamer->noise_ctx)) {
+        fprintf(stderr, "Noise Protocol handshake incomplete\n");
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    printf("Noise Protocol encryption established\n");
+
+    // Now verify PIN over encrypted channel
     printf("Enter PIN (4 digits, displayed on TV receiver): ");
     fflush(stdout);
     char pin_str[32];
     if (!fgets(pin_str, sizeof(pin_str), stdin)) {
         fprintf(stderr, "No PIN entered.\n");
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
         close(streamer->tv_fd);
         streamer->tv_fd = -1;
         return -1;
     }
     uint16_t pin = (uint16_t)atoi(pin_str);
 
-    // Send PIN verification
+    // Send PIN verification over encrypted channel
     pin_verify_t pin_msg = {.pin = pin};
-    if (protocol_send_message(streamer->tv_fd, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
+    if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
         fprintf(stderr, "Failed to send PIN verification\n");
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
         close(streamer->tv_fd);
         streamer->tv_fd = -1;
         return -1;
     }
 
-    // Wait for PIN verified response
+    // Wait for PIN verified response over encrypted channel
     message_header_t header;
     void *payload = NULL;
-    if (protocol_receive_message(streamer->tv_fd, &header, &payload) <= 0 ||
+    if (streamer_receive_message(streamer, &header, &payload) <= 0 ||
         header.type != MSG_PIN_VERIFIED) {
         fprintf(stderr, "PIN verification failed\n");
         if (payload) free(payload);
+        noise_encryption_cleanup(streamer->noise_ctx);
+        streamer->noise_ctx = NULL;
         close(streamer->tv_fd);
         streamer->tv_fd = -1;
         return -1;

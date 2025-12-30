@@ -112,6 +112,15 @@ public class Protocol {
         return sendMessage(out, MSG_HELLO, payload.array());
     }
 
+    public static MessageHeader parseHeader(byte[] headerBytes) {
+        ByteBuffer header = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN);
+        MessageHeader msg = new MessageHeader();
+        msg.type = header.get();
+        msg.length = header.getInt();
+        msg.sequence = header.getInt();
+        return msg;
+    }
+
     public static MessageHeader receiveHeader(InputStream in) throws IOException {
         byte[] headerBytes = new byte[9];
         int read = 0;

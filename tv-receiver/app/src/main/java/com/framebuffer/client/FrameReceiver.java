@@ -25,6 +25,7 @@ public class FrameReceiver extends Thread {
     private ConfigCallback configCallback;
     private android.content.Context context;
     private AudioReceiver audioReceiver;
+    private NoiseEncryption noiseEncryption;  // Noise Protocol encryption context
 
     // Current configuration state
     private int currentWidth = 0;
@@ -34,10 +35,11 @@ public class FrameReceiver extends Thread {
     private Bitmap currentFrameBitmap;  // Store current frame for dirty rectangle compositing
     private H264Decoder h264Decoder;  // H.264 decoder for encoded frames
 
-    public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder, android.content.Context context) {
+    public FrameReceiver(Socket socket, SurfaceHolder surfaceHolder, android.content.Context context, NoiseEncryption noiseEncryption) {
         this.socket = socket;
         this.surfaceHolder = surfaceHolder;
         this.context = context;
+        this.noiseEncryption = noiseEncryption;
     }
 
     public void setConfigCallback(ConfigCallback callback) {
@@ -65,16 +67,34 @@ public class FrameReceiver extends Thread {
             InputStream in = socket.getInputStream();
 
             while (running && !isInterrupted()) {
-                Protocol.MessageHeader header = Protocol.receiveHeader(in);
+                // Receive header (encrypted if Noise is ready)
+                Protocol.MessageHeader header;
+                if (noiseEncryption != null && noiseEncryption.isReady()) {
+                    byte[] headerBytes = noiseEncryption.recv(socket, 9);
+                    if (headerBytes == null || headerBytes.length != 9) {
+                        break; // Connection closed
+                    }
+                    header = Protocol.parseHeader(headerBytes);
+                } else {
+                    header = Protocol.receiveHeader(in);
+                }
 
                 if (header.type == Protocol.MSG_FRAME) {
-                    // Read frame message (now 34 bytes: 32 + encoding_mode + num_regions)
-                    byte[] frameData = new byte[34]; // FrameMessage size
-                    int read = 0;
-                    while (read < 34) {
-                        int n = in.read(frameData, read, 34 - read);
-                        if (n < 0) break;
-                        read += n;
+                    // Read frame message (now 34 bytes: 32 + encoding_mode + num_regions) - encrypted
+                    byte[] frameData;
+                    if (noiseEncryption != null && noiseEncryption.isReady()) {
+                        frameData = noiseEncryption.recv(socket, 34);
+                        if (frameData == null || frameData.length != 34) {
+                            break; // Connection closed
+                        }
+                    } else {
+                        frameData = new byte[34];
+                        int read = 0;
+                        while (read < 34) {
+                            int n = in.read(frameData, read, 34 - read);
+                            if (n < 0) break;
+                            read += n;
+                        }
                     }
 
                     Protocol.FrameMessage frame = Protocol.parseFrameMessage(frameData);
