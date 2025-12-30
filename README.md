@@ -10,6 +10,7 @@ Virtual displays created by clients behave exactly like physical displays - you 
 - `client/` - Android client application (Java/Kotlin)
 - `PLAN.md` - Detailed implementation plan
 - `HLD.md` - High-Level Design document (architecture and design overview)
+- `USB_TETHERING_ADB.md` - Guide for enabling USB tethering on Android devices via ADB
 
 ## Server
 

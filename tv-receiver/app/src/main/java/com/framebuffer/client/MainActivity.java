@@ -7,6 +7,9 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkRequest;
 import java.io.IOException;
 import java.net.Socket;
 
@@ -29,6 +32,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private java.net.DatagramSocket udpSocket;
     private Thread udpListenerThread;
     private int tcpPort;  // TCP port for connections
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,6 +70,30 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
         // Initial display visibility check
         updateDisplayVisibility();
+
+        // Set up network change listener to update IP display when interfaces change
+        connectivityManager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network network) {
+                android.util.Log.i("MainActivity", "Network available: " + network);
+                updateIpDisplay();
+            }
+
+            @Override
+            public void onLost(Network network) {
+                android.util.Log.i("MainActivity", "Network lost: " + network);
+                updateIpDisplay();
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, android.net.NetworkCapabilities networkCapabilities) {
+                android.util.Log.i("MainActivity", "Network capabilities changed: " + network);
+                updateIpDisplay();
+            }
+        };
+        NetworkRequest request = new NetworkRequest.Builder().build();
+        connectivityManager.registerNetworkCallback(request, networkCallback);
 
         // Automatically start listening when app opens
         startListening();
@@ -723,6 +752,22 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         return true;
     }
 
+    // Check if an interface name indicates mobile data (should be filtered out)
+    private boolean isMobileDataInterface(String ifaceName) {
+        if (ifaceName == null) return false;
+        String name = ifaceName.toLowerCase();
+        // Common mobile data interface prefixes
+        return name.startsWith("rmnet") ||
+               name.startsWith("ccmni") ||
+               name.startsWith("pdp") ||
+               name.startsWith("wwan") ||
+               name.startsWith("cdma") ||
+               name.startsWith("umts") ||
+               name.startsWith("lte") ||
+               name.startsWith("gsm") ||
+               name.contains("mobile");
+    }
+
     private java.util.List<String> getAllLocalIpAddresses() {
         java.util.List<String> ipList = new java.util.ArrayList<>();
         try {
@@ -732,6 +777,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 java.net.NetworkInterface iface = interfaces.nextElement();
                 // Skip interfaces that are down
                 if (!iface.isUp()) continue;
+
+                // Skip mobile data interfaces
+                String ifaceName = iface.getName();
+                if (isMobileDataInterface(ifaceName)) {
+                    android.util.Log.d("MainActivity", "Skipping mobile data interface: " + ifaceName);
+                    continue;
+                }
 
                 java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
@@ -748,6 +800,35 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             ipList.add("0.0.0.0");
         }
         return ipList;
+    }
+
+    // Update IP display when network interfaces change
+    private void updateIpDisplay() {
+        if (!listening) return;
+
+        new Handler(Looper.getMainLooper()).post(() -> {
+            // Get updated IP addresses
+            java.util.List<String> localIps = getAllLocalIpAddresses();
+            android.util.Log.i("MainActivity", "Network changed - Updated IP addresses: " + String.join(", ", localIps));
+
+            // Update display with up to 3 IPs
+            java.util.List<String> displayIps = new java.util.ArrayList<>();
+            for (int i = 0; i < Math.min(3, localIps.size()); i++) {
+                displayIps.add(localIps.get(i));
+            }
+            String displayIpText = String.join(", ", displayIps);
+
+            // Store for redrawing when surface is recreated
+            currentDisplayIp = displayIpText;
+
+            // Update the display if we have a surface
+            if (surfaceView != null && surfaceView.getHolder() != null) {
+                displayConnectionInfoOnTV(currentDisplayPort, displayIpText, pinCode);
+            }
+            if (tvSurfaceView != null && tvSurfaceView.getHolder() != null) {
+                displayConnectionInfoOnTV(currentDisplayPort, displayIpText, pinCode);
+            }
+        });
     }
 
     private void displayConnectionInfoOnTV(int port, String ip, int pin) {
@@ -799,6 +880,11 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     protected void onDestroy() {
+        // Unregister network callback
+        if (connectivityManager != null && networkCallback != null) {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        }
+
         super.onDestroy();
         // Stop listening only when activity is actually being destroyed
         android.util.Log.i("MainActivity", "onDestroy() called - stopping listening");

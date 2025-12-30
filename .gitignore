@@ -18,6 +18,7 @@ x11-streamer/build/
 *.a
 *.exe
 *.out
+x11-streamer/x11-streamer
 
 # IDE files
 .vscode/

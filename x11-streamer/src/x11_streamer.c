@@ -44,6 +44,7 @@ struct x11_streamer {
     int tv_port;
     bool use_broadcast;  // Whether to use broadcast discovery
     int broadcast_timeout_ms;  // Broadcast discovery timeout
+    char *program_name;  // Program name (for error messages)
     bool running;
     x11_context_t *x11_ctx;
     tv_connection_t *tv_conn;  // Single TV connection
@@ -839,6 +840,13 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     }
     streamer->tv_port = opts.port;
     streamer->broadcast_timeout_ms = opts.broadcast_timeout_ms;
+    // Store program name (extract basename if provided)
+    if (opts.program_name) {
+        const char *basename = strrchr(opts.program_name, '/');
+        streamer->program_name = strdup(basename ? basename + 1 : opts.program_name);
+    } else {
+        streamer->program_name = strdup("x11-streamer");  // Default fallback
+    }
     streamer->enable_encryption = true;  // Default: enabled, will be adjusted based on CAPABILITIES message
     streamer->tv_fd = -1;
     streamer->x11_ctx = x11_context_create();
@@ -934,6 +942,8 @@ void x11_streamer_destroy(x11_streamer_t *streamer)
     pthread_mutex_destroy(&streamer->tv_mutex);
     if (streamer->tv_host)
         free(streamer->tv_host);
+    if (streamer->program_name)
+        free(streamer->program_name);
     free(streamer);
 }
 
@@ -944,9 +954,17 @@ typedef struct {
     char display_name[256];
 } discovery_response_info_t;
 
+// Forward declarations for USB tethering functions
+static bool enable_usb_tethering_via_adb(void);
+static bool get_usb_tethering_ip_via_adb(char *ip_buf, size_t ip_buf_size);
+
 // Broadcast discovery: find TV receiver on all network interfaces using UDP
 static int discover_tv_receiver(x11_streamer_t *streamer, struct in_addr *found_addr, int *found_port)
 {
+    // Enable USB tethering before attempting broadcast discovery
+    printf("Attempting to enable USB tethering on connected device...\n");
+    enable_usb_tethering_via_adb();
+
     int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_fd < 0) {
         perror("socket(UDP)");
@@ -1086,7 +1104,19 @@ static int discover_tv_receiver(x11_streamer_t *streamer, struct in_addr *found_
     close(udp_fd);
 
     if (response_count == 0) {
-        printf("No TV receivers found.\n");
+        printf("No TV receivers found via broadcast discovery.\n");
+
+        // Try to get USB tethering IP and inform the user
+        char usb_ip[INET_ADDRSTRLEN] = {0};
+        if (get_usb_tethering_ip_via_adb(usb_ip, sizeof(usb_ip))) {
+            fprintf(stderr, "\nUSB tethering is available. Try connecting directly to: %s:%d\n",
+                    usb_ip, streamer->tv_port);
+            const char *prog_name = streamer->program_name ? streamer->program_name : "x11-streamer";
+            fprintf(stderr, "Example: %s %s:%d\n", prog_name, usb_ip, streamer->tv_port);
+        } else {
+            fprintf(stderr, "\nCould not detect USB tethering IP address.\n");
+            fprintf(stderr, "Please ensure USB tethering is enabled on your device, or specify the device IP as a positional argument.\n");
+        }
         return -1;
     }
 
@@ -1188,7 +1218,34 @@ static bool check_tv_receiver_listening(int port)
     return false;  // Can't verify via adb
 }
 
-// Helper function to get device IP via adb
+// Helper function to get all device IPs via adb
+static int get_device_ips_via_adb(char ip_list[][16], int max_ips)
+{
+    // Get all IPv4 addresses from all interfaces
+    FILE *fp = popen("adb shell 'ip -4 addr show | grep \"inet \" | awk \"{print \\$2}\" | cut -d/ -f1' 2>/dev/null", "r");
+    if (!fp)
+        return 0;
+
+    int count = 0;
+    char line[64];
+    while (count < max_ips && fgets(line, sizeof(line), fp)) {
+        // Remove newline
+        size_t len = strlen(line);
+        if (len > 0 && line[len-1] == '\n') {
+            line[len-1] = '\0';
+        }
+        // Skip localhost
+        if (strcmp(line, "127.0.0.1") != 0 && strlen(line) > 0) {
+            strncpy(ip_list[count], line, 15);
+            ip_list[count][15] = '\0';
+            count++;
+        }
+    }
+    pclose(fp);
+    return count;
+}
+
+// Helper function to get device IP via adb (backward compatibility - returns WiFi IP)
 static bool get_device_ip_via_adb(char *ip_buf, size_t ip_buf_size)
 {
     FILE *fp = popen("adb shell 'ip -4 addr show wlan0 | grep inet | head -1 | awk \"{print \\$2}\" | cut -d/ -f1' 2>/dev/null", "r");
@@ -1204,6 +1261,93 @@ static bool get_device_ip_via_adb(char *ip_buf, size_t ip_buf_size)
         }
         pclose(fp);
     }
+    return false;
+}
+
+// Helper function to enable USB tethering via ADB
+static bool enable_usb_tethering_via_adb(void)
+{
+    // First, try to set the USB function to RNDIS (USB tethering)
+    // This may fail on non-rooted devices, but we try anyway
+    int result = system("adb shell 'svc usb setFunctions rndis' 2>/dev/null");
+    if (result == 0) {
+        printf("USB tethering enabled via ADB\n");
+        // Give it a moment to establish
+        sleep(1);
+        return true;
+    }
+
+    // If that fails, try setting the tether_dun_required setting
+    // This might help on some devices
+    system("adb shell 'settings put global tether_dun_required 0' 2>/dev/null");
+
+    // Check if USB is already in RNDIS mode
+    FILE *fp = popen("adb shell 'svc usb getFunctions' 2>/dev/null", "r");
+    if (fp) {
+        char line[64];
+        if (fgets(line, sizeof(line), fp)) {
+            pclose(fp);
+            if (strstr(line, "rndis") != NULL) {
+                printf("USB tethering already enabled (RNDIS mode detected)\n");
+                return true;
+            }
+        } else {
+            pclose(fp);
+        }
+    }
+
+    // If we can't enable it directly, inform the user
+    fprintf(stderr, "Warning: Could not enable USB tethering via ADB. "
+                    "You may need to enable it manually on your device.\n");
+    return false;
+}
+
+// Helper function to get USB tethering IP address via ADB
+static bool get_usb_tethering_ip_via_adb(char *ip_buf, size_t ip_buf_size)
+{
+    // Check for USB tethering interface (typically usb0, rndis0, or similar)
+    // Try common USB tethering interface names
+    const char *usb_interfaces[] = {"usb0", "rndis0", "rndis", NULL};
+
+    for (int i = 0; usb_interfaces[i] != NULL; i++) {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "adb shell 'ip -4 addr show %s 2>/dev/null | grep \"inet \" | head -1 | awk \"{print \\$2}\" | cut -d/ -f1' 2>/dev/null",
+                 usb_interfaces[i]);
+
+        FILE *fp = popen(cmd, "r");
+        if (fp) {
+            if (fgets(ip_buf, ip_buf_size, fp)) {
+                // Remove newline
+                size_t len = strlen(ip_buf);
+                if (len > 0 && ip_buf[len-1] == '\n') {
+                    ip_buf[len-1] = '\0';
+                }
+                pclose(fp);
+                if (strlen(ip_buf) > 0 && strcmp(ip_buf, "127.0.0.1") != 0) {
+                    return true;
+                }
+            }
+            pclose(fp);
+        }
+    }
+
+    // Fallback: look for any interface with "usb" or "rndis" in the name
+    FILE *fp = popen("adb shell 'ip -4 addr show | grep -E \"(usb|rndis)\" -A 2 | grep \"inet \" | head -1 | awk \"{print \\$2}\" | cut -d/ -f1' 2>/dev/null", "r");
+    if (fp) {
+        if (fgets(ip_buf, ip_buf_size, fp)) {
+            size_t len = strlen(ip_buf);
+            if (len > 0 && ip_buf[len-1] == '\n') {
+                ip_buf[len-1] = '\0';
+            }
+            pclose(fp);
+            if (strlen(ip_buf) > 0 && strcmp(ip_buf, "127.0.0.1") != 0) {
+                return true;
+            }
+        }
+        pclose(fp);
+    }
+
     return false;
 }
 
@@ -1230,7 +1374,6 @@ int x11_streamer_run(x11_streamer_t *streamer)
                 free(streamer->tv_host);
             streamer->tv_host = strdup(addr_str);
         } else {
-            fprintf(stderr, "TV receiver not found via broadcast discovery\n");
             return -1;
         }
     } else if (streamer->tv_host) {
@@ -1261,12 +1404,61 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
     // Check if device is reachable via adb
     char device_ip[INET_ADDRSTRLEN] = {0};
-    bool device_reachable = get_device_ip_via_adb(device_ip, sizeof(device_ip));
-    if (device_reachable) {
-        printf("Debug: Device IP (via adb): %s\n", device_ip);
-        if (strcmp(addr_str, device_ip) != 0) {
-            fprintf(stderr, "Debug: Warning - Target IP (%s) differs from device IP (%s)\n", addr_str, device_ip);
+    // Get all device IPs and check if target is reachable
+    char device_ips[8][16];
+    int num_ips = get_device_ips_via_adb(device_ips, 8);
+    if (num_ips > 0) {
+        printf("Debug: Device IPs (via adb): ");
+        for (int i = 0; i < num_ips; i++) {
+            printf("%s%s", device_ips[i], (i < num_ips - 1) ? ", " : "\n");
         }
+
+        // Check if target IP is in the list
+        bool target_found = false;
+        for (int i = 0; i < num_ips; i++) {
+            if (strcmp(addr_str, device_ips[i]) == 0) {
+                target_found = true;
+                break;
+            }
+        }
+
+        if (!target_found) {
+            fprintf(stderr, "Debug: Warning - Target IP (%s) not found in device IPs\n", addr_str);
+            fprintf(stderr, "Debug: Try connecting to one of: %s\n", device_ips[0]);
+            // Check if we can reach any of the device IPs from our network
+            bool can_reach_any = false;
+            for (int i = 0; i < num_ips; i++) {
+                // Simple check: if IP is in same subnet as our interfaces
+                struct ifaddrs *ifaddrs_list;
+                if (getifaddrs(&ifaddrs_list) == 0) {
+                    for (struct ifaddrs *ifa = ifaddrs_list; ifa != NULL; ifa = ifa->ifa_next) {
+                        if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET) {
+                            struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+                            struct in_addr local_addr = sin->sin_addr;
+                            struct in_addr target_addr;
+                            if (inet_aton(device_ips[i], &target_addr) == 1) {
+                                // Check if same subnet (simple heuristic: first 2 octets match)
+                                if ((local_addr.s_addr & 0xFFFF0000) == (target_addr.s_addr & 0xFFFF0000)) {
+                                    can_reach_any = true;
+                                    fprintf(stderr, "Debug: Suggest using %s (same subnet as %s)\n",
+                                           device_ips[i], ifa->ifa_name);
+                                    break;
+                                }
+                            }
+                        }
+                        if (can_reach_any) break;
+                    }
+                    freeifaddrs(ifaddrs_list);
+                }
+                if (can_reach_any) break;
+            }
+        }
+    }
+
+    // Backward compatibility: also show WiFi IP
+    bool device_reachable = get_device_ip_via_adb(device_ip, sizeof(device_ip));
+    if (device_reachable && num_ips == 0) {
+        printf("Debug: Device WiFi IP (via adb): %s\n", device_ip);
     }
 
     // Check if port is listening via adb

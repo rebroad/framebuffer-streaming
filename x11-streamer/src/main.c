@@ -41,7 +41,8 @@ int main(int argc, char *argv[])
         .use_broadcast = true,  // Default: use broadcast
         .host = NULL,
         .port = DEFAULT_TV_PORT,
-        .broadcast_timeout_ms = 5000
+        .broadcast_timeout_ms = 5000,
+        .program_name = argv[0]  // Pass program name for error messages
     };
 
     // Parse command-line arguments

@@ -71,13 +71,13 @@ int audio_capture_start(audio_capture_t *capture)
 
     int error;
     capture->pa = pa_simple_new(NULL,                    // server
-                                 "x11-fb-streamer",       // application name
-                                 PA_STREAM_RECORD,        // direction
-                                 NULL,                    // device (NULL = default)
-                                 "Audio capture",          // stream name
-                                 &ss,                     // sample spec
-                                 NULL,                    // channel map (NULL = default)
-                                 &ba,                     // buffer attributes
+                                 "x11-streamer",         // application name
+                                 PA_STREAM_RECORD,       // direction
+                                 NULL,                   // device (NULL = default)
+                                 "Audio capture",        // stream name
+                                 &ss,                    // sample spec
+                                 NULL,                   // channel map (NULL = default)
+                                 &ba,                    // buffer attributes
                                  &error);
 
     if (!capture->pa) {

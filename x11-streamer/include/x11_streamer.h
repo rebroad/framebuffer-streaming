@@ -14,6 +14,7 @@ typedef struct {
     const char *host;        // Direct host to connect to (if not NULL, disables broadcast)
     int port;                // Port number (default: DEFAULT_TV_PORT)
     int broadcast_timeout_ms; // Timeout for broadcast discovery in milliseconds (default: 5000)
+    const char *program_name; // Program name (for error messages, extracted from argv[0])
 } streamer_discovery_options_t;
 
 // Create X11 streamer that connects to TV receiver

@@ -93,10 +93,15 @@ if(X264_FOUND)
 endif()
 
 # Executable
-add_executable(x11-fb-streamer ${STREAMER_SOURCES})
+add_executable(x11-streamer ${STREAMER_SOURCES})
+
+# Set output directory to be one level above build directory
+set_target_properties(x11-streamer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
 
 # Link libraries
-target_link_libraries(x11-fb-streamer
+target_link_libraries(x11-streamer
     ${X11_LIBRARIES}
     ${XRANDR_LIBRARIES}
     ${DRM_LIBRARIES}
@@ -106,12 +111,12 @@ target_link_libraries(x11-fb-streamer
 
 # Link x264 if available
 if(X264_FOUND)
-    target_link_libraries(x11-fb-streamer ${X264_LIBRARIES})
-    target_include_directories(x11-fb-streamer PRIVATE ${X264_INCLUDE_DIRS})
+    target_link_libraries(x11-streamer ${X264_LIBRARIES})
+    target_include_directories(x11-streamer PRIVATE ${X264_INCLUDE_DIRS})
 endif()
 
 # Compile options for our code
-target_compile_options(x11-fb-streamer PRIVATE
+target_compile_options(x11-streamer PRIVATE
     ${X11_CFLAGS_OTHER}
     ${XRANDR_CFLAGS_OTHER}
     ${DRM_CFLAGS_OTHER}
