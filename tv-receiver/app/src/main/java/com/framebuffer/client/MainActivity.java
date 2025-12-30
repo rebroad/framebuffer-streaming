@@ -119,13 +119,15 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 String firstIp = localIps.isEmpty() ? "0.0.0.0" : localIps.get(0);
                 startUdpBroadcastListener(port, firstIp);
 
-                // Update status text with all IPs
-                final String ipList = String.join("\n", localIps);
+                // Display connection info on SurfaceView (yellow PIN display)
+                // Show up to 3 IPs
+                java.util.List<String> displayIps = new java.util.ArrayList<>();
+                for (int i = 0; i < Math.min(3, localIps.size()); i++) {
+                    displayIps.add(localIps.get(i));
+                }
+                final String displayIpText = String.join(", ", displayIps);
                 new Handler(Looper.getMainLooper()).post(() -> {
-                    String displayText = ipList + "\nPort: " + port + "\nPIN: " + String.format("%04d", pinCode);
-                    statusText.setText(displayText);
-                    // Display connection info on TV (use first IP for TV display)
-                    displayConnectionInfoOnTV(port, firstIp, pinCode);
+                    displayConnectionInfoOnTV(port, displayIpText, pinCode);
                 });
 
                 // Keep accepting connections in a loop
@@ -325,11 +327,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         clientSocket = null;
 
                         // Restore listening display
-                        final String ipListRestore = String.join("\n", localIps);
+                        // Show up to 3 IPs
+                        java.util.List<String> displayIpsRestore = new java.util.ArrayList<>();
+                        for (int i = 0; i < Math.min(3, localIps.size()); i++) {
+                            displayIpsRestore.add(localIps.get(i));
+                        }
+                        final String displayIpTextRestore = String.join(", ", displayIpsRestore);
                         new Handler(Looper.getMainLooper()).post(() -> {
-                            String displayText = ipListRestore + "\nPort: " + port + "\nPIN: " + String.format("%04d", pinCode);
-                            statusText.setText(displayText);
-                            displayConnectionInfoOnTV(port, firstIp, pinCode);
+                            displayConnectionInfoOnTV(port, displayIpTextRestore, pinCode);
                         });
 
                     } catch (IOException e) {
