@@ -676,7 +676,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 canvas.drawText("IP: " + ip, centerX, y, paint);
                 y += 60;
                 canvas.drawText("Port: " + port, centerX, y, paint);
-                y += 60;
+                y += 90;  // Increased gap between port and PIN
                 paint.setTextSize(72);
                 paint.setColor(android.graphics.Color.YELLOW);
                 paint.setFakeBoldText(true);
