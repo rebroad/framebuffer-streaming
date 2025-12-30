@@ -19,6 +19,7 @@ public class Protocol {
     public static final byte MSG_DISCOVERY_RESPONSE = 0x11;  // UDP broadcast discovery response
     public static final byte MSG_PIN_VERIFY = 0x12;         // PIN verification request
     public static final byte MSG_PIN_VERIFIED = 0x13;        // PIN verification success
+    public static final byte MSG_CAPABILITIES = 0x14;       // Capabilities message (sent immediately after connection)
     public static final byte MSG_ERROR = (byte)0xFF;
 
     public static class MessageHeader {

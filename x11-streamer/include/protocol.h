@@ -19,6 +19,7 @@ typedef enum {
     MSG_DISCOVERY_RESPONSE = 0x11, // UDP broadcast discovery response
     MSG_PIN_VERIFY = 0x12,         // PIN verification request
     MSG_PIN_VERIFIED = 0x13,       // PIN verification success
+    MSG_CAPABILITIES = 0x14,       // Capabilities message (sent immediately after connection)
     MSG_ERROR = 0xFF
 } message_type_t;
 
@@ -111,6 +112,12 @@ typedef struct __attribute__((packed)) {
 
 // PIN_VERIFIED message (TCP, response to PIN_VERIFY)
 // Empty payload - just the message header
+
+// CAPABILITIES message (TCP, sent immediately after connection by receiver)
+typedef struct __attribute__((packed)) {
+    uint8_t requires_encryption;  // 1 if encryption/PIN required, 0 if not
+    uint8_t reserved[3];          // Reserved for future use
+} capabilities_message_t;
 
 int protocol_send_message(int fd, message_type_t type, const void *data, size_t data_len);
 int protocol_receive_message(int fd, message_header_t *header, void **payload);

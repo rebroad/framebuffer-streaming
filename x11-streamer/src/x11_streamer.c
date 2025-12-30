@@ -194,11 +194,31 @@ static void *tv_receiver_thread(void *arg)
 
             if (virtual_output_id != None) {
                 int refresh_rate = preferred_mode->refresh_rate / 100;
-                printf("Created virtual output: '%s' (%dx%d@%dHz)\n",
-                       tv_display_name, preferred_mode->width,
-                       preferred_mode->height, refresh_rate);
                 // Refresh outputs to get the new virtual output
                 x11_context_refresh_outputs(streamer->x11_ctx);
+
+                // Find and print the TV receiver's virtual output
+                output_info_t *tv_output = NULL;
+                for (int i = 0; i < streamer->x11_ctx->num_outputs; i++) {
+                    if (streamer->x11_ctx->outputs[i].output_id == virtual_output_id) {
+                        tv_output = &streamer->x11_ctx->outputs[i];
+                        break;
+                    }
+                }
+
+                if (tv_output) {
+                    printf("TV receiver virtual output: '%s' %dx%d@%dHz",
+                           tv_output->name ? tv_output->name : tv_display_name,
+                           tv_output->width, tv_output->height, refresh_rate);
+                    if (hello_msg->num_modes > 1) {
+                        printf(" (%d modes available)", hello_msg->num_modes);
+                    }
+                    printf("\n");
+                } else {
+                    printf("Created virtual output: '%s' (%dx%d@%dHz)\n",
+                           tv_display_name, preferred_mode->width,
+                           preferred_mode->height, refresh_rate);
+                }
 
                 // Set all modes from TV receiver (not just the first one)
                 if (hello_msg->num_modes > 1) {
@@ -762,7 +782,6 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
         opts.host = NULL;
         opts.port = DEFAULT_TV_PORT;
         opts.broadcast_timeout_ms = 5000;
-        opts.enable_encryption = true;  // Default: enable encryption
     }
 
     // If host is specified, disable broadcast
@@ -775,7 +794,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     }
     streamer->tv_port = opts.port;
     streamer->broadcast_timeout_ms = opts.broadcast_timeout_ms;
-    streamer->enable_encryption = opts.enable_encryption;
+    streamer->enable_encryption = true;  // Default: enabled, will be adjusted based on CAPABILITIES message
     streamer->tv_fd = -1;
     streamer->x11_ctx = x11_context_create();
     if (!streamer->x11_ctx) {
@@ -1295,9 +1314,57 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
     printf("Connected to TV receiver\n");
 
+    // Receive CAPABILITIES message from TV receiver to know if encryption is needed
+    printf("Debug: Waiting for CAPABILITIES message from TV receiver...\n");
+    message_header_t header;
+    void *payload = NULL;
+    struct pollfd pfd = {.fd = streamer->tv_fd, .events = POLLIN};
+    int poll_ret = poll(&pfd, 1, 2000);  // 2 second timeout
+    if (poll_ret <= 0) {
+        if (poll_ret == 0) {
+            fprintf(stderr, "Timeout waiting for CAPABILITIES message\n");
+        } else {
+            perror("poll");
+        }
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    int ret = protocol_receive_message(streamer->tv_fd, &header, &payload);
+    if (ret <= 0 || header.type != MSG_CAPABILITIES) {
+        fprintf(stderr, "Expected CAPABILITIES message, got type 0x%02x\n", header.type);
+        if (payload) free(payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    if (!payload || header.length < sizeof(capabilities_message_t)) {
+        fprintf(stderr, "Invalid CAPABILITIES message format\n");
+        if (payload) free(payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    capabilities_message_t *cap = (capabilities_message_t *)payload;
+    bool receiver_requires_encryption = (cap->requires_encryption != 0);
+    printf("Debug: TV receiver capabilities: requires_encryption=%d\n", receiver_requires_encryption);
+    free(payload);
+    payload = NULL;
+
+    // Override streamer's encryption setting based on receiver's capabilities
+    // If receiver says encryption not needed (USB tethering), disable it
+    if (!receiver_requires_encryption) {
+        printf("Debug: TV receiver indicates encryption not needed (USB tethering) - disabling encryption\n");
+        streamer->enable_encryption = false;
+    }
+
     // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
-    // Only if encryption is enabled
-    if (streamer->enable_encryption) {
+    // Only if receiver requires encryption
+    if (receiver_requires_encryption) {
+        printf("Debug: Encryption enabled - starting Noise Protocol handshake\n");
         streamer->noise_ctx = noise_encryption_init(true);  // Streamer is initiator
         if (!streamer->noise_ctx) {
             fprintf(stderr, "Failed to initialize Noise Protocol encryption\n");
@@ -1305,6 +1372,7 @@ int x11_streamer_run(x11_streamer_t *streamer)
             streamer->tv_fd = -1;
             return -1;
         }
+        printf("Debug: Noise context initialized, calling handshake...\n");
 
         if (noise_encryption_handshake(streamer->noise_ctx, streamer->tv_fd) < 0) {
             fprintf(stderr, "Noise Protocol handshake failed\n");
@@ -1368,8 +1436,9 @@ int x11_streamer_run(x11_streamer_t *streamer)
         printf("PIN verified successfully\n");
     } else {
         streamer->noise_ctx = NULL;
-        printf("Encryption disabled - using unencrypted connection (DMA-BUF zero-copy enabled)\n");
-        printf("Skipping PIN verification (encryption disabled)\n");
+        printf("Encryption not required by TV receiver (USB tethering) - using unencrypted connection\n");
+        printf("DMA-BUF zero-copy enabled for better performance\n");
+        printf("Debug: Waiting for HELLO message from TV receiver...\n");
     }
 
     // Start TV receiver thread to handle communication
@@ -1381,13 +1450,11 @@ int x11_streamer_run(x11_streamer_t *streamer)
         return -1;
     }
 
-    // Refresh outputs
+    // Refresh outputs (needed for X11 event processing, but we don't print local outputs)
     if (x11_context_refresh_outputs(streamer->x11_ctx) < 0) {
         printf("Failed to refresh outputs\n");
         return -1;
     }
-
-    printf("Found %d outputs\n", streamer->x11_ctx->num_outputs);
 
     // Get X11 display file descriptor for polling
     int x11_fd = x11_context_get_fd(streamer->x11_ctx);

@@ -152,40 +152,68 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         android.util.Log.i("MainActivity", "Connection accepted from " + acceptedSocket.getRemoteSocketAddress());
                         clientSocket = acceptedSocket;
 
-                        // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
-                        NoiseEncryption noiseEncryption = new NoiseEncryption(false);  // Receiver is responder
-                        currentNoiseEncryption = noiseEncryption;  // Store for use in verifyPinFromClient
-                        try {
-                            if (!noiseEncryption.handshake(acceptedSocket)) {
-                                android.util.Log.e("MainActivity", "Noise Protocol handshake failed");
-                                noiseEncryption.cleanup();
-                                currentNoiseEncryption = null;
-                                acceptedSocket.close();
-                                continue; // Continue listening for next connection
-                            }
-                            if (!noiseEncryption.isReady()) {
-                                android.util.Log.e("MainActivity", "Noise Protocol handshake incomplete");
-                                noiseEncryption.cleanup();
-                                currentNoiseEncryption = null;
-                                acceptedSocket.close();
-                                continue; // Continue listening for next connection
-                            }
-                            android.util.Log.i("MainActivity", "Noise Protocol encryption established");
-                        } catch (IOException e) {
-                            android.util.Log.e("MainActivity", "Noise Protocol handshake error", e);
-                            noiseEncryption.cleanup();
-                            currentNoiseEncryption = null;
-                            acceptedSocket.close();
-                            continue; // Continue listening for next connection
-                        }
+                        // Determine if PIN verification is required based on network interface
+                        android.util.Log.i("MainActivity", "=== CONNECTION HANDLING ===");
+                        android.util.Log.i("MainActivity", "Local address: " + acceptedSocket.getLocalAddress());
+                        boolean requiresPin = shouldRequirePin(acceptedSocket);
+                        android.util.Log.i("MainActivity", "Connection from interface requiring PIN: " + requiresPin);
 
-                        // Now verify PIN over encrypted channel
-                        if (!verifyPinFromClient(acceptedSocket, noiseEncryption)) {
-                            android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
-                            noiseEncryption.cleanup();
-                            currentNoiseEncryption = null;
-                            acceptedSocket.close();
-                            continue; // Continue listening for next connection
+                        // Send capabilities message IMMEDIATELY to tell streamer if encryption is needed
+                        // This must be sent before streamer tries to do Noise handshake
+                        java.io.OutputStream out = acceptedSocket.getOutputStream();
+                        byte[] capabilitiesPayload = new byte[4];
+                        capabilitiesPayload[0] = (byte)(requiresPin ? 1 : 0);  // requires_encryption
+                        capabilitiesPayload[1] = 0;  // reserved
+                        capabilitiesPayload[2] = 0;  // reserved
+                        capabilitiesPayload[3] = 0;  // reserved
+                        Protocol.sendMessage(out, Protocol.MSG_CAPABILITIES, capabilitiesPayload);
+                        android.util.Log.i("MainActivity", "Sent CAPABILITIES message: requires_encryption=" + requiresPin);
+
+                        // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
+                        // Only if PIN is required (encryption enabled)
+                        NoiseEncryption noiseEncryption = null;
+                        if (requiresPin) {
+                            android.util.Log.i("MainActivity", "Starting Noise Protocol handshake (PIN required)");
+                            noiseEncryption = new NoiseEncryption(false);  // Receiver is responder
+                            currentNoiseEncryption = noiseEncryption;  // Store for use in verifyPinFromClient
+                            try {
+                                android.util.Log.d("MainActivity", "Calling noiseEncryption.handshake()...");
+                                if (!noiseEncryption.handshake(acceptedSocket)) {
+                                    android.util.Log.e("MainActivity", "Noise Protocol handshake failed");
+                                    noiseEncryption.cleanup();
+                                    currentNoiseEncryption = null;
+                                    acceptedSocket.close();
+                                    continue; // Continue listening for next connection
+                                }
+                                if (!noiseEncryption.isReady()) {
+                                    android.util.Log.e("MainActivity", "Noise Protocol handshake incomplete");
+                                    noiseEncryption.cleanup();
+                                    currentNoiseEncryption = null;
+                                    acceptedSocket.close();
+                                    continue; // Continue listening for next connection
+                                }
+                                android.util.Log.i("MainActivity", "Noise Protocol encryption established");
+                            } catch (IOException e) {
+                                android.util.Log.e("MainActivity", "Noise Protocol handshake error", e);
+                                noiseEncryption.cleanup();
+                                currentNoiseEncryption = null;
+                                acceptedSocket.close();
+                                continue; // Continue listening for next connection
+                            }
+
+                            // Now verify PIN over encrypted channel
+                            android.util.Log.i("MainActivity", "Waiting for PIN verification from client...");
+                            if (!verifyPinFromClient(acceptedSocket, noiseEncryption)) {
+                                android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
+                                noiseEncryption.cleanup();
+                                currentNoiseEncryption = null;
+                                acceptedSocket.close();
+                                continue; // Continue listening for next connection
+                            }
+                            android.util.Log.i("MainActivity", "PIN verification successful");
+                        } else {
+                            android.util.Log.i("MainActivity", "Skipping Noise handshake and PIN verification (trusted interface: USB tethering)");
+                            currentNoiseEncryption = null;  // No encryption for USB tethering
                         }
 
                         new Handler(Looper.getMainLooper()).post(() -> {
@@ -285,16 +313,22 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             modes[0].refreshRate = refreshRateInt;
                         }
 
-                        // Send HELLO with display name and modes (encrypted)
+                        // Send HELLO with display name and modes
+                        // Use encryption if PIN was required (and Noise handshake succeeded)
+                        android.util.Log.i("MainActivity", "Sending HELLO message...");
+                        android.util.Log.d("MainActivity", "noiseEncryption: " + noiseEncryption + ", isReady: " + (noiseEncryption != null ? noiseEncryption.isReady() : "N/A"));
                         if (noiseEncryption != null && noiseEncryption.isReady()) {
+                            android.util.Log.i("MainActivity", "Sending HELLO encrypted");
                             // Build HELLO message
                             java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
                             Protocol.sendHello(baos, displayName, modes);
                             noiseEncryption.send(acceptedSocket, baos.toByteArray());
                         } else {
-                            // Fallback to unencrypted (should not happen)
+                            android.util.Log.i("MainActivity", "Sending HELLO unencrypted");
+                            // Unencrypted (for trusted interfaces: USB tethering)
                             Protocol.sendHello(acceptedSocket.getOutputStream(), displayName, modes);
                         }
+                        android.util.Log.i("MainActivity", "HELLO message sent");
 
                         // Start frame receiver - use appropriate SurfaceHolder
                         // If TV is connected, use TV's SurfaceView; otherwise use phone's SurfaceView
@@ -640,6 +674,51 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             android.util.Log.e("MainActivity", "PIN verification error", e);
             return false;
         }
+    }
+
+    /**
+     * Determine if PIN verification is required based on the network interface.
+     * Only USB tethering (rndis0) is trusted and doesn't require PIN.
+     * All other interfaces (wlan0, swlan0, etc.) require PIN verification for security.
+     */
+    private boolean shouldRequirePin(Socket socket) {
+        try {
+            java.net.InetAddress localAddr = socket.getLocalAddress();
+            if (localAddr == null) {
+                // Can't determine interface, require PIN for security
+                return true;
+            }
+
+            // Get all network interfaces and find which one this address belongs to
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                java.net.NetworkInterface iface = interfaces.nextElement();
+                java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress addr = addresses.nextElement();
+                    if (addr.equals(localAddr)) {
+                        String ifaceName = iface.getName();
+                        android.util.Log.i("MainActivity", "Connection from interface: " + ifaceName);
+
+                        // USB tethering interface (rndis0) - trusted, no PIN required
+                        if (ifaceName.equals("rndis0")) {
+                            android.util.Log.i("MainActivity", "USB tethering detected - PIN not required");
+                            return false;
+                        }
+
+                        // All other interfaces (wlan0, swlan0, etc.) require PIN
+                        android.util.Log.i("MainActivity", "Interface " + ifaceName + " requires PIN authentication");
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.e("MainActivity", "Error determining network interface", e);
+        }
+
+        // Default to requiring PIN for security if we can't determine the interface
+        return true;
     }
 
     private java.util.List<String> getAllLocalIpAddresses() {

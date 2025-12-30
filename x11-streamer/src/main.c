@@ -27,14 +27,10 @@ static void print_usage(const char *prog_name)
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --port PORT          Port number for broadcast discovery (default: %d)\n", DEFAULT_TV_PORT);
     fprintf(stderr, "  --broadcast-timeout MS  Broadcast discovery timeout in milliseconds (default: 5000)\n");
-    fprintf(stderr, "  --no-encryption      Disable Noise Protocol encryption (default: enabled)\n");
-    fprintf(stderr, "                       When disabled, enables DMA-BUF zero-copy for better performance\n");
-    fprintf(stderr, "                       Only use on secure networks (e.g., local network, VPN)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Examples:\n");
-    fprintf(stderr, "  %s                           # Broadcast discovery on port %d (default, encrypted)\n", prog_name, DEFAULT_TV_PORT);
-    fprintf(stderr, "  %s 192.168.1.100:4321        # Connect directly to IP:port (encrypted)\n", prog_name);
-    fprintf(stderr, "  %s --no-encryption           # Disable encryption for better performance on secure network\n", prog_name);
+    fprintf(stderr, "  %s                           # Broadcast discovery on port %d\n", prog_name, DEFAULT_TV_PORT);
+    fprintf(stderr, "  %s 192.168.1.100:4321        # Connect directly to IP:port\n", prog_name);
     fprintf(stderr, "  %s --port 8888               # Broadcast discovery on port 8888\n", prog_name);
     fprintf(stderr, "\n");
 }
@@ -45,8 +41,7 @@ int main(int argc, char *argv[])
         .use_broadcast = true,  // Default: use broadcast
         .host = NULL,
         .port = DEFAULT_TV_PORT,
-        .broadcast_timeout_ms = 5000,
-        .enable_encryption = true  // Default: enable encryption
+        .broadcast_timeout_ms = 5000
     };
 
     // Parse command-line arguments
@@ -73,8 +68,6 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Error: Invalid timeout: %s\n", argv[i]);
                 return 1;
             }
-        } else if (strcmp(argv[i], "--no-encryption") == 0) {
-            options.enable_encryption = false;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;

@@ -168,11 +168,14 @@ int x11_context_refresh_outputs(x11_context_t *ctx)
         }
 
         // Check if it's a virtual output (not a physical connector)
-        // Virtual outputs are created via CREATE_XR_OUTPUT, so they won't have
-        // standard physical connector names. We'll identify them by checking
-        // if they're not in the standard physical output list.
-        // For now, we'll check if it's NOT the XR-Manager output
-        out->is_virtual = (strcmp(output_info->name, "XR-Manager") != 0);
+        // Virtual outputs are created via CREATE_XR_OUTPUT.
+        // Physical outputs typically have standard connector names like:
+        // eDP, DisplayPort-0, HDMI-1, VGA-1, etc.
+        // XR-Manager is a special control output, not a virtual output.
+        // For now, we can't reliably distinguish virtual from physical outputs
+        // just by name, so we'll default to false (physical) and let the
+        // caller mark virtual outputs explicitly if needed.
+        out->is_virtual = false;
 
         // Get FRAMEBUFFER_ID property
         if (!get_output_property(ctx->display, out->output_id,
@@ -314,10 +317,12 @@ RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
     usleep(100000);  // 100ms
     x11_context_refresh_outputs(ctx);
 
-    // Find the newly created output
+    // Find the newly created output by name match
+    // (Virtual outputs created via CREATE_XR_OUTPUT will have the name we specified)
     for (int i = 0; i < ctx->num_outputs; i++) {
-        if (ctx->outputs[i].is_virtual &&
-            strncmp(ctx->outputs[i].name, name, strlen(name)) == 0) {
+        if (ctx->outputs[i].name && strncmp(ctx->outputs[i].name, name, strlen(name)) == 0) {
+            // Mark it as virtual since we just created it
+            ctx->outputs[i].is_virtual = true;
             printf("Created virtual output: %s (%dx%d@%dHz)\n",
                    ctx->outputs[i].name, width, height, refresh);
             return ctx->outputs[i].output_id;
