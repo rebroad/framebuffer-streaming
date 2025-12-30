@@ -68,7 +68,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        // Surface is ready
+        // Surface is recreated (e.g., app came back to foreground)
+        // Update FrameReceiver with new SurfaceHolder if it exists
+        if (frameReceiver != null) {
+            frameReceiver.updateSurfaceHolder(holder);
+            android.util.Log.i("MainActivity", "Updated FrameReceiver with new SurfaceHolder");
+        }
+        // Tell streamer to resume sending frames now that we can render them
+        sendResumeMessage();
     }
 
     @Override
@@ -78,7 +85,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        stopListening();
+        // Surface can be destroyed when app goes to background, but we keep listening
+        // Only stop listening when activity is actually destroyed (onDestroy)
+        // Tell streamer to pause sending frames since we can't render them
+        sendPauseMessage();
     }
 
     private void startListening() {
@@ -86,16 +96,24 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         int port = 4321;
         tcpPort = port;
         listening = true;
+        android.util.Log.i("MainActivity", "startListening() called, port=" + port);
 
         // Generate random 4-digit PIN (0-9999)
         pinCode = new java.util.Random().nextInt(10000);
+        android.util.Log.i("MainActivity", "Generated PIN: " + String.format("%04d", pinCode));
 
         serverThread = new Thread(() -> {
             try {
-                serverSocket = new java.net.ServerSocket(port);
+                android.util.Log.i("MainActivity", "Creating ServerSocket on port " + port);
+                // Bind to IPv4 explicitly to ensure compatibility
+                serverSocket = new java.net.ServerSocket();
+                serverSocket.bind(new java.net.InetSocketAddress("0.0.0.0", port));
+                android.util.Log.i("MainActivity", "ServerSocket created successfully, listening on port " + port);
+                android.util.Log.i("MainActivity", "ServerSocket local address: " + serverSocket.getLocalSocketAddress());
 
                 // Get all local IP addresses for display
                 java.util.List<String> localIps = getAllLocalIpAddresses();
+                android.util.Log.i("MainActivity", "Local IP addresses: " + String.join(", ", localIps));
 
                 // Start UDP broadcast listener for discovery (use first IP for discovery)
                 String firstIp = localIps.isEmpty() ? "0.0.0.0" : localIps.get(0);
@@ -111,11 +129,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 });
 
                 // Keep accepting connections in a loop
+                android.util.Log.i("MainActivity", "Starting to accept connections on port " + port);
                 while (listening) {
                     Socket acceptedSocket = null;
                     try {
                         // Wait for X11 server to connect
+                        android.util.Log.d("MainActivity", "Waiting for connection on " + serverSocket.getLocalSocketAddress());
                         acceptedSocket = serverSocket.accept();
+                        android.util.Log.i("MainActivity", "Connection accepted from " + acceptedSocket.getRemoteSocketAddress());
                         clientSocket = acceptedSocket;
 
                         // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
@@ -333,6 +354,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         // Continue listening for next connection
                     }
                 }
+                android.util.Log.i("MainActivity", "Stopped accepting connections (listening=" + listening + ")");
+            } catch (java.net.BindException e) {
+                android.util.Log.e("MainActivity", "Failed to bind ServerSocket to port " + port + ": " + e.getMessage(), e);
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    Toast.makeText(MainActivity.this, "Failed to bind to port " + port + ": " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    statusText.setText("Error: Failed to bind to port " + port);
+                });
             } catch (IOException e) {
                 android.util.Log.e("MainActivity", "Server socket error", e);
                 new Handler(Looper.getMainLooper()).post(() -> {
@@ -344,6 +372,44 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             }
         });
         serverThread.start();
+    }
+
+    private void sendPauseMessage() {
+        if (clientSocket == null || clientSocket.isClosed()) {
+            return;
+        }
+        try {
+            if (currentNoiseEncryption != null && currentNoiseEncryption.isReady()) {
+                // Build proper protocol message with header
+                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                Protocol.sendMessage(baos, Protocol.MSG_PAUSE, null);
+                currentNoiseEncryption.send(clientSocket, baos.toByteArray());
+            } else {
+                Protocol.sendMessage(clientSocket.getOutputStream(), Protocol.MSG_PAUSE, null);
+            }
+            android.util.Log.i("MainActivity", "Sent PAUSE message to streamer");
+        } catch (IOException e) {
+            android.util.Log.w("MainActivity", "Failed to send PAUSE message", e);
+        }
+    }
+
+    private void sendResumeMessage() {
+        if (clientSocket == null || clientSocket.isClosed()) {
+            return;
+        }
+        try {
+            if (currentNoiseEncryption != null && currentNoiseEncryption.isReady()) {
+                // Build proper protocol message with header
+                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                Protocol.sendMessage(baos, Protocol.MSG_RESUME, null);
+                currentNoiseEncryption.send(clientSocket, baos.toByteArray());
+            } else {
+                Protocol.sendMessage(clientSocket.getOutputStream(), Protocol.MSG_RESUME, null);
+            }
+            android.util.Log.i("MainActivity", "Sent RESUME message to streamer");
+        } catch (IOException e) {
+            android.util.Log.w("MainActivity", "Failed to send RESUME message", e);
+        }
     }
 
     private void stopListening() {
@@ -630,6 +696,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // Stop listening only when activity is actually being destroyed
+        stopListening();
         if (displayManager != null && displayListener != null) {
             displayManager.unregisterDisplayListener(displayListener);
         }

@@ -46,6 +46,18 @@ public class FrameReceiver extends Thread {
         this.configCallback = callback;
     }
 
+    public void updateSurfaceHolder(SurfaceHolder newSurfaceHolder) {
+        // Update the SurfaceHolder when surface is recreated (e.g., app comes back to foreground)
+        synchronized (this) {
+            this.surfaceHolder = newSurfaceHolder;
+            // If H.264 decoder exists, we need to recreate it with the new surface
+            if (h264Decoder != null) {
+                h264Decoder.release();
+                h264Decoder = null; // Will be recreated on next frame with new surface
+            }
+        }
+    }
+
     public void stopReceiving() {
         running = false;
         if (audioReceiver != null) {
@@ -212,7 +224,11 @@ public class FrameReceiver extends Thread {
     }
 
     private void drawH264Frame(Protocol.FrameMessage frame, InputStream in) {
-        if (surfaceHolder == null) return;
+        SurfaceHolder holder;
+        synchronized (this) {
+            holder = this.surfaceHolder;
+        }
+        if (holder == null) return;
 
         try {
             // Initialize or recreate H.264 decoder if needed
@@ -224,7 +240,7 @@ public class FrameReceiver extends Thread {
                 }
 
                 // Get Surface from SurfaceHolder
-                android.view.Surface surface = surfaceHolder.getSurface();
+                android.view.Surface surface = holder.getSurface();
                 if (surface != null && surface.isValid()) {
                     h264Decoder = new H264Decoder(frame.width, frame.height, surface);
                     if (!h264Decoder.initialize()) {
@@ -255,11 +271,15 @@ public class FrameReceiver extends Thread {
     }
 
     private void drawDirtyRectangles(Protocol.FrameMessage frame, InputStream in) {
-        if (surfaceHolder == null) return;
+        SurfaceHolder holder;
+        synchronized (this) {
+            holder = this.surfaceHolder;
+        }
+        if (holder == null) return;
 
         Canvas canvas = null;
         try {
-            canvas = surfaceHolder.lockCanvas();
+            canvas = holder.lockCanvas();
             if (canvas == null) return;
 
             // Initialize or resize frame bitmap if needed
@@ -323,17 +343,21 @@ public class FrameReceiver extends Thread {
             e.printStackTrace();
         } finally {
             if (canvas != null) {
-                surfaceHolder.unlockCanvasAndPost(canvas);
+                holder.unlockCanvasAndPost(canvas);
             }
         }
     }
 
     private void drawFrame(Protocol.FrameMessage frame, byte[] pixels) {
-        if (surfaceHolder == null) return;
+        SurfaceHolder holder;
+        synchronized (this) {
+            holder = this.surfaceHolder;
+        }
+        if (holder == null) return;
 
         Canvas canvas = null;
         try {
-            canvas = surfaceHolder.lockCanvas();
+            canvas = holder.lockCanvas();
             if (canvas == null) return;
 
             canvas.drawColor(0, PorterDuff.Mode.CLEAR);
@@ -361,7 +385,7 @@ public class FrameReceiver extends Thread {
             e.printStackTrace();
         } finally {
             if (canvas != null) {
-                surfaceHolder.unlockCanvasAndPost(canvas);
+                holder.unlockCanvasAndPost(canvas);
             }
         }
     }
@@ -434,18 +458,22 @@ public class FrameReceiver extends Thread {
     }
 
     private void clearSurface() {
-        if (surfaceHolder == null) return;
+        SurfaceHolder holder;
+        synchronized (this) {
+            holder = this.surfaceHolder;
+        }
+        if (holder == null) return;
 
         Canvas canvas = null;
         try {
-            canvas = surfaceHolder.lockCanvas();
+            canvas = holder.lockCanvas();
             if (canvas == null) return;
             canvas.drawColor(Color.BLACK);
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
             if (canvas != null) {
-                surfaceHolder.unlockCanvasAndPost(canvas);
+                holder.unlockCanvasAndPost(canvas);
             }
         }
     }

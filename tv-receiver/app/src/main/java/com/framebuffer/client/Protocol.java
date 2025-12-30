@@ -13,6 +13,8 @@ public class Protocol {
     public static final byte MSG_CONFIG = 0x05;
     public static final byte MSG_PING = 0x06;
     public static final byte MSG_PONG = 0x07;
+    public static final byte MSG_PAUSE = 0x08;        // Pause frame sending (receiver has no surface)
+    public static final byte MSG_RESUME = 0x09;      // Resume frame sending (receiver has surface again)
     public static final byte MSG_DISCOVERY_REQUEST = 0x10;  // UDP broadcast discovery request
     public static final byte MSG_DISCOVERY_RESPONSE = 0x11;  // UDP broadcast discovery response
     public static final byte MSG_PIN_VERIFY = 0x12;         // PIN verification request

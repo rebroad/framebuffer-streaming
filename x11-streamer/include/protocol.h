@@ -13,6 +13,8 @@ typedef enum {
     MSG_CONFIG = 0x05,
     MSG_PING = 0x06,
     MSG_PONG = 0x07,
+    MSG_PAUSE = 0x08,        // Pause frame sending (receiver has no surface)
+    MSG_RESUME = 0x09,      // Resume frame sending (receiver has surface again)
     MSG_DISCOVERY_REQUEST = 0x10,  // UDP broadcast discovery request
     MSG_DISCOVERY_RESPONSE = 0x11, // UDP broadcast discovery response
     MSG_PIN_VERIFY = 0x12,         // PIN verification request

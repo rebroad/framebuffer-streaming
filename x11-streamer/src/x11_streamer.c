@@ -32,6 +32,7 @@ typedef struct tv_connection {
     x11_streamer_t *streamer;  // Reference to streamer for frame sending
     RROutput virtual_output_id;  // Virtual XR output created for this TV
     char display_name[64];
+    bool paused;  // True when receiver has no surface (paused sending frames)
 } tv_connection_t;
 
 struct x11_streamer {
@@ -273,6 +274,20 @@ static void *tv_receiver_thread(void *arg)
         switch (header.type) {
         case MSG_PING:
             streamer_send_message(streamer, MSG_PONG, NULL, 0);
+            break;
+
+        case MSG_PAUSE:
+            if (streamer->tv_conn) {
+                streamer->tv_conn->paused = true;
+                printf("TV receiver paused (no surface) - frame sending paused\n");
+            }
+            break;
+
+        case MSG_RESUME:
+            if (streamer->tv_conn) {
+                streamer->tv_conn->paused = false;
+                printf("TV receiver resumed (surface available) - frame sending resumed\n");
+            }
             break;
 
         default:
@@ -1055,17 +1070,77 @@ static int discover_tv_receiver(x11_streamer_t *streamer, struct in_addr *found_
     return 0;
 }
 
-// Helper function to print connection debugging advice
-static void print_connection_debug(const char *error_msg, const char *addr_str, int port)
+// Helper function to check if TV receiver is listening via adb
+static bool check_tv_receiver_listening(int port)
 {
-    if (error_msg && error_msg[0] != '\0') {
-        fprintf(stderr, "%s\n", error_msg);
+    // Try multiple methods to check if port is listening
+    char cmd[512];
+
+    // Method 1: netstat (older Android versions)
+    snprintf(cmd, sizeof(cmd), "adb shell 'netstat -an 2>/dev/null | grep :%d | grep LISTEN' 2>/dev/null", port);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "LISTEN") || strstr(line, "tcp")) {
+                pclose(fp);
+                return true;
+            }
+        }
+        pclose(fp);
     }
-    fprintf(stderr, "Debug: Check if:\n");
-    fprintf(stderr, "  1. TV receiver is running and listening on port %d\n", port);
-    fprintf(stderr, "  2. Firewall allows connections on port %d\n", port);
-    fprintf(stderr, "  3. Device is on the same network\n");
-    fprintf(stderr, "  4. IP address %s is correct\n", addr_str);
+
+    // Method 2: ss (newer Android versions)
+    snprintf(cmd, sizeof(cmd), "adb shell 'ss -tuln 2>/dev/null | grep :%d' 2>/dev/null", port);
+    fp = popen(cmd, "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp)) {
+            pclose(fp);
+            return true;
+        }
+        pclose(fp);
+    }
+
+    // Method 3: Check if app process is running
+    snprintf(cmd, sizeof(cmd), "adb shell 'ps -A 2>/dev/null | grep framebuffer' 2>/dev/null");
+    fp = popen(cmd, "r");
+    if (fp) {
+        char line[256];
+        bool app_running = false;
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "framebuffer") || strstr(line, "com.framebuffer")) {
+                app_running = true;
+                break;
+            }
+        }
+        pclose(fp);
+        if (app_running) {
+            // App is running but port check failed - might be listening on different interface
+            return false;  // Return false but we know app is running
+        }
+    }
+
+    return false;  // Can't verify via adb
+}
+
+// Helper function to get device IP via adb
+static bool get_device_ip_via_adb(char *ip_buf, size_t ip_buf_size)
+{
+    FILE *fp = popen("adb shell 'ip -4 addr show wlan0 | grep inet | head -1 | awk \"{print \\$2}\" | cut -d/ -f1' 2>/dev/null", "r");
+    if (fp) {
+        if (fgets(ip_buf, ip_buf_size, fp)) {
+            // Remove newline
+            size_t len = strlen(ip_buf);
+            if (len > 0 && ip_buf[len-1] == '\n') {
+                ip_buf[len-1] = '\0';
+            }
+            pclose(fp);
+            return strlen(ip_buf) > 0;
+        }
+        pclose(fp);
+    }
+    return false;
 }
 
 int x11_streamer_run(x11_streamer_t *streamer)
@@ -1119,8 +1194,24 @@ int x11_streamer_run(x11_streamer_t *streamer)
     char addr_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, addr_str, sizeof(addr_str));
     printf("Connecting to TV receiver at %s:%d...\n", addr_str, streamer->tv_port);
-    printf("Debug: Resolved address: %s, port: %d (network byte order: %d)\n",
-           addr_str, streamer->tv_port, ntohs(addr.sin_port));
+
+    // Check if device is reachable via adb
+    char device_ip[INET_ADDRSTRLEN] = {0};
+    bool device_reachable = get_device_ip_via_adb(device_ip, sizeof(device_ip));
+    if (device_reachable) {
+        printf("Debug: Device IP (via adb): %s\n", device_ip);
+        if (strcmp(addr_str, device_ip) != 0) {
+            fprintf(stderr, "Debug: Warning - Target IP (%s) differs from device IP (%s)\n", addr_str, device_ip);
+        }
+    }
+
+    // Check if port is listening via adb
+    bool port_listening = check_tv_receiver_listening(streamer->tv_port);
+    if (port_listening) {
+        printf("Debug: Port %d is listening on device (checked via adb)\n", streamer->tv_port);
+    } else {
+        fprintf(stderr, "Debug: Port %d is NOT listening on device (checked via adb)\n", streamer->tv_port);
+    }
 
     // Set socket to non-blocking temporarily to check connection status
     int flags = fcntl(streamer->tv_fd, F_GETFL, 0);
@@ -1165,17 +1256,15 @@ int x11_streamer_run(x11_streamer_t *streamer)
                     errno = so_error;
                     fprintf(stderr, "Connection failed: ");
                     perror("connect");
-                    fprintf(stderr, "Debug: Error code: %d\n", so_error);
-                    print_connection_debug("", addr_str, streamer->tv_port);
+                    fprintf(stderr, "Debug: Error code: %d (EHOSTUNREACH=%d, ECONNREFUSED=%d, ETIMEDOUT=%d)\n",
+                           so_error, EHOSTUNREACH, ECONNREFUSED, ETIMEDOUT);
                     close(streamer->tv_fd);
                     streamer->tv_fd = -1;
                     return -1;
                 }
                 // Connection succeeded
             } else if (select_result == 0) {
-                char timeout_msg[256];
-                snprintf(timeout_msg, sizeof(timeout_msg), "Connection timeout: No response from %s:%d", addr_str, streamer->tv_port);
-                print_connection_debug(timeout_msg, addr_str, streamer->tv_port);
+                fprintf(stderr, "Connection timeout: No response from %s:%d\n", addr_str, streamer->tv_port);
                 close(streamer->tv_fd);
                 streamer->tv_fd = -1;
                 return -1;
@@ -1188,8 +1277,8 @@ int x11_streamer_run(x11_streamer_t *streamer)
         } else {
             fprintf(stderr, "Connection failed: ");
             perror("connect");
-            fprintf(stderr, "Debug: Error code: %d\n", errno);
-            print_connection_debug("", addr_str, streamer->tv_port);
+            fprintf(stderr, "Debug: Error code: %d (EHOSTUNREACH=%d, ECONNREFUSED=%d, ETIMEDOUT=%d)\n",
+                   errno, EHOSTUNREACH, ECONNREFUSED, ETIMEDOUT);
             close(streamer->tv_fd);
             streamer->tv_fd = -1;
             return -1;

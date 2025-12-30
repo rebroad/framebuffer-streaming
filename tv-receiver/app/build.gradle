@@ -6,13 +6,17 @@ android {
     namespace 'com.framebuffer.client'
     compileSdk 34
 
-    defaultConfig {
-        applicationId "com.framebuffer.client"
-        minSdk 24
-        targetSdk 34
-        versionCode 1
-        versionName "1.0"
+    // Auto-increment version code on each build
+    def versionPropsFile = file('version.properties')
+    def versionProps = new Properties()
+    if (versionPropsFile.canRead()) {
+        versionProps.load(new FileInputStream(versionPropsFile))
+    } else {
+        versionProps['VERSION_CODE'] = '1'
     }
+    def versionCode = Integer.parseInt(versionProps['VERSION_CODE'] ?: '1')
+    versionProps['VERSION_CODE'] = (versionCode + 1).toString()
+    versionProps.store(versionPropsFile.newWriter(), null)
 
     // Conditionally enable native build if NDK is properly configured
     def ndkHome = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
@@ -40,8 +44,19 @@ android {
 
         // Set NDK version explicitly to avoid Gradle trying to use wrong version
         android.ndkVersion = ndkPath.name
+    }
 
-        defaultConfig {
+    defaultConfig {
+        applicationId "com.framebuffer.client"
+        minSdk 24
+        targetSdk 34
+        versionCode = versionCode
+        versionName = "1.0.${versionCode}"
+
+        // Make version name available to resources
+        resValue "string", "app_version", "v${versionName}"
+
+        if (ndkPath != null && ndkPath.exists() && file("${ndkPath}/source.properties").exists()) {
             ndk {
                 abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
             }
@@ -55,7 +70,9 @@ android {
                 }
             }
         }
+    }
 
+    if (ndkPath != null && ndkPath.exists() && file("${ndkPath}/source.properties").exists()) {
         externalNativeBuild {
             cmake {
                 path "src/main/cpp/CMakeLists.txt"
@@ -93,4 +110,3 @@ dependencies {
     implementation 'com.google.android.material:material:1.10.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
 }
-
