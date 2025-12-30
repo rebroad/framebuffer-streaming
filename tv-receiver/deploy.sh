@@ -159,14 +159,3 @@ if [ "$LAUNCH_APP" = true ]; then
     echo -e "${GREEN}App launched!${NC}"
 fi
 
-echo -e "${GREEN}Done!${NC}"
-echo ""
-echo "App info:"
-echo "  Package: $APP_ID"
-echo "  APK: $APK_PATH"
-if [ "$LAUNCH_APP" = false ]; then
-    echo ""
-    echo "To launch the app manually, run:"
-    echo "  adb shell am start -n $APP_ID/$MAIN_ACTIVITY"
-fi
-

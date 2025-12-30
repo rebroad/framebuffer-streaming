@@ -17,6 +17,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private Socket clientSocket;
     private FrameReceiver frameReceiver;
     private boolean listening = false;
+    private String currentDisplayIp = null;  // Store current IP for redrawing
+    private int currentDisplayPort = 4321;     // Store current port for redrawing
     private Thread serverThread;
     private NoiseEncryption currentNoiseEncryption;  // Current Noise encryption context for active connection
     private android.hardware.display.DisplayManager displayManager;
@@ -31,7 +33,11 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        android.util.Log.i("MainActivity", "onCreate() called");
         setContentView(R.layout.activity_main);
+
+        // Keep screen on while TV receiver is running
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         surfaceView = findViewById(R.id.surfaceView);
 
@@ -71,9 +77,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         if (frameReceiver != null) {
             frameReceiver.updateSurfaceHolder(holder);
             android.util.Log.i("MainActivity", "Updated FrameReceiver with new SurfaceHolder");
+            // Tell streamer to resume sending frames now that we can render them
+            sendResumeMessage();
+        } else if (listening && currentDisplayIp != null) {
+            // We're listening but not connected - redraw connection info
+            android.util.Log.i("MainActivity", "Surface recreated while listening - redrawing connection info");
+            displayConnectionInfoOnTV(currentDisplayPort, currentDisplayIp, pinCode);
         }
-        // Tell streamer to resume sending frames now that we can render them
-        sendResumeMessage();
     }
 
     @Override
@@ -124,6 +134,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     displayIps.add(localIps.get(i));
                 }
                 final String displayIpText = String.join(", ", displayIps);
+                // Store for redrawing when surface is recreated
+                currentDisplayIp = displayIpText;
+                currentDisplayPort = port;
                 new Handler(Looper.getMainLooper()).post(() -> {
                     displayConnectionInfoOnTV(port, displayIpText, pinCode);
                 });
@@ -416,6 +429,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     }
 
     private void stopListening() {
+        if (!listening) {
+            android.util.Log.d("MainActivity", "stopListening() called but already stopped");
+            return;  // Already stopped
+        }
+        android.util.Log.i("MainActivity", "stopListening() called - setting listening=false");
+        // Log stack trace to see who called stopListening
+        android.util.Log.i("MainActivity", "stopListening() call stack:", new Exception("Stack trace"));
         listening = false;
 
         if (frameReceiver != null) {
@@ -700,6 +720,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     protected void onDestroy() {
         super.onDestroy();
         // Stop listening only when activity is actually being destroyed
+        android.util.Log.i("MainActivity", "onDestroy() called - stopping listening");
+        // Clear screen wake lock
+        getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         stopListening();
         if (displayManager != null && displayListener != null) {
             displayManager.unregisterDisplayListener(displayListener);
@@ -708,7 +731,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             tvPresentation.dismiss();
             tvPresentation = null;
         }
-        stopListening();
     }
 
     private boolean isTvConnected() {
