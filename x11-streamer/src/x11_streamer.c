@@ -54,6 +54,25 @@ struct x11_streamer {
 #endif
 };
 
+// Helper functions for encrypted/unencrypted protocol operations
+static inline int streamer_send_message(x11_streamer_t *streamer, message_type_t type, const void *data, size_t data_len)
+{
+    if (streamer->noise_ctx && noise_encryption_is_ready(streamer->noise_ctx)) {
+        return protocol_send_message_encrypted(streamer->noise_ctx, streamer->tv_fd, type, data, data_len);
+    } else {
+        return protocol_send_message(streamer->tv_fd, type, data, data_len);
+    }
+}
+
+static inline int streamer_receive_message(x11_streamer_t *streamer, message_header_t *header, void **payload)
+{
+    if (streamer->noise_ctx && noise_encryption_is_ready(streamer->noise_ctx)) {
+        return protocol_receive_message_encrypted(streamer->noise_ctx, streamer->tv_fd, header, payload);
+    } else {
+        return protocol_receive_message(streamer->tv_fd, header, payload);
+    }
+}
+
 static void *tv_receiver_thread(void *arg)
 {
     x11_streamer_t *streamer = (x11_streamer_t *)arg;
@@ -75,7 +94,7 @@ static void *tv_receiver_thread(void *arg)
         goto cleanup;
     }
 
-    int ret = protocol_receive_message(streamer->tv_fd, &header, &payload);
+    int ret = streamer_receive_message(streamer, &header, &payload);
     if (ret <= 0) {
         fprintf(stderr, "TV receiver handshake failed: connection closed or invalid data\n");
         goto cleanup;
@@ -239,7 +258,7 @@ static void *tv_receiver_thread(void *arg)
 
         switch (header.type) {
         case MSG_PING:
-            protocol_send_message(streamer->tv_fd, MSG_PONG, NULL, 0);
+            streamer_send_message(streamer, MSG_PONG, NULL, 0);
             break;
 
         default:
@@ -394,7 +413,7 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     }
 
     // Send frame header
-    if (protocol_send_message(streamer->tv_fd, MSG_FRAME, &frame, sizeof(frame)) < 0) {
+    if (streamer_send_message(streamer, MSG_FRAME, &frame, sizeof(frame)) < 0) {
         printf("Failed to send frame to TV receiver\n");
         streamer->running = false;
         return;
@@ -619,7 +638,7 @@ static void streamer_capture_and_send_audio(x11_streamer_t *streamer)
         };
 
         // Send audio header
-        if (protocol_send_message(streamer->tv_fd, MSG_AUDIO, &audio_msg, sizeof(audio_msg)) < 0) {
+        if (streamer_send_message(streamer, MSG_AUDIO, &audio_msg, sizeof(audio_msg)) < 0) {
             printf("Failed to send audio header\n");
             free(audio_data);
             return;
@@ -668,7 +687,7 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
             .refresh_rate = output->refresh_rate
         };
 
-        protocol_send_message(streamer->tv_fd, MSG_CONFIG, &config, sizeof(config));
+        streamer_send_message(streamer, MSG_CONFIG, &config, sizeof(config));
         printf("Sent CONFIG to TV receiver: %dx%d@%dHz\n",
                config.width, config.height, config.refresh_rate);
     }
@@ -684,7 +703,7 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
             .refresh_rate = output->connected ? output->refresh_rate : 0
         };
 
-        protocol_send_message(streamer->tv_fd, MSG_CONFIG, &config, sizeof(config));
+        streamer_send_message(streamer, MSG_CONFIG, &config, sizeof(config));
         printf("Sent CONFIG to TV receiver: %s (output %s)\n",
                output->connected ? "connected" : "disconnected",
                output->name);

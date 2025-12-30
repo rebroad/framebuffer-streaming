@@ -5,8 +5,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.widget.Button;
-import android.widget.EditText;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import java.io.IOException;
@@ -14,8 +12,6 @@ import java.net.Socket;
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     private SurfaceView surfaceView;
-    private EditText listenPortEdit;
-    private Button startStopButton;
     private android.widget.TextView statusText;
 
     private java.net.ServerSocket serverSocket;
@@ -38,9 +34,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         setContentView(R.layout.activity_main);
 
         surfaceView = findViewById(R.id.surfaceView);
-        listenPortEdit = findViewById(R.id.serverPort);  // Reuse port field
-        startStopButton = findViewById(R.id.connectButton);  // Reuse button
-        statusText = findViewById(R.id.statusText);  // We'll need to add this
+        statusText = findViewById(R.id.statusText);
 
         surfaceView.getHolder().addCallback(this);
 
@@ -67,17 +61,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         // Initial display visibility check
         updateDisplayVisibility();
 
-        // Set default port
-        listenPortEdit.setText("4321");
-        listenPortEdit.setHint("Listen Port");
-
-        startStopButton.setOnClickListener(v -> {
-            if (listening) {
-                stopListening();
-            } else {
-                startListening();
-            }
-        });
+        // Automatically start listening when app opens
+        startListening();
     }
 
     @Override
@@ -96,26 +81,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     }
 
     private void startListening() {
-        String portStr = listenPortEdit.getText().toString().trim();
-
-        int port;
-        if (portStr.isEmpty()) {
-            // Use default port
-            port = 4321;
-            listenPortEdit.setText(String.valueOf(port));
-        } else {
-            try {
-                port = Integer.parseInt(portStr);
-            } catch (NumberFormatException e) {
-                Toast.makeText(this, "Invalid port number", Toast.LENGTH_SHORT).show();
-                return;
-            }
-        }
-
-        listening = true;
-        startStopButton.setText("Stop Listening");
-        listenPortEdit.setEnabled(false);
+        // Use default port
+        int port = 4321;
         tcpPort = port;
+        listening = true;
 
         // Generate random 4-digit PIN (0-9999)
         pinCode = new java.util.Random().nextInt(10000);
@@ -124,176 +93,238 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             try {
                 serverSocket = new java.net.ServerSocket(port);
 
-                // Get local IP address for display
-                String localIp = getLocalIpAddress();
+                // Get all local IP addresses for display
+                java.util.List<String> localIps = getAllLocalIpAddresses();
 
-                // Start UDP broadcast listener for discovery
-                startUdpBroadcastListener(port, localIp);
+                // Start UDP broadcast listener for discovery (use first IP for discovery)
+                String firstIp = localIps.isEmpty() ? "0.0.0.0" : localIps.get(0);
+                startUdpBroadcastListener(port, firstIp);
 
-                // Update status text
+                // Update status text with all IPs
+                final String ipList = String.join("\n", localIps);
                 new Handler(Looper.getMainLooper()).post(() -> {
-                    statusText.setText("Listening on " + localIp + ":" + port + " (PIN: " + String.format("%04d", pinCode) + ")");
-                    Toast.makeText(MainActivity.this,
-                        "Listening on port " + port + "\nIP: " + localIp + "\nPIN: " + String.format("%04d", pinCode),
-                        Toast.LENGTH_LONG).show();
-                    // Display connection info on TV
-                    displayConnectionInfoOnTV(port, localIp, pinCode);
+                    String displayText = ipList + "\nPort: " + port + "\nPIN: " + String.format("%04d", pinCode);
+                    statusText.setText(displayText);
+                    // Display connection info on TV (use first IP for TV display)
+                    displayConnectionInfoOnTV(port, firstIp, pinCode);
                 });
 
-                // Wait for X11 server to connect
-                clientSocket = serverSocket.accept();
-
-                // Verify PIN before proceeding
-                if (!verifyPinFromClient(clientSocket)) {
-                    android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
-                    clientSocket.close();
-                    clientSocket = null;
-                    return;
-                }
-
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    statusText.setText("Connected to X11 streamer");
-                    Toast.makeText(MainActivity.this, "X11 server connected", Toast.LENGTH_SHORT).show();
-                    // Clear the connection info from TV (frame receiver will start drawing)
-                    SurfaceHolder holder = surfaceView.getHolder();
-                    android.graphics.Canvas canvas = null;
+                // Keep accepting connections in a loop
+                while (listening) {
+                    Socket acceptedSocket = null;
                     try {
-                        canvas = holder.lockCanvas();
-                        if (canvas != null) {
-                            canvas.drawColor(android.graphics.Color.BLACK);
-                            holder.unlockCanvasAndPost(canvas);
+                        // Wait for X11 server to connect
+                        acceptedSocket = serverSocket.accept();
+                        clientSocket = acceptedSocket;
+
+                        // Verify PIN before proceeding
+                        if (!verifyPinFromClient(acceptedSocket)) {
+                            android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
+                            acceptedSocket.close();
+                            continue; // Continue listening for next connection
                         }
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                        if (canvas != null) {
+
+                        // Perform Noise Protocol handshake for encrypted communication
+                        NoiseEncryption noiseEncryption = new NoiseEncryption(false);  // Receiver is responder
+                        try {
+                            if (!noiseEncryption.handshake(acceptedSocket)) {
+                                android.util.Log.e("MainActivity", "Noise Protocol handshake failed");
+                                noiseEncryption.cleanup();
+                                acceptedSocket.close();
+                                continue; // Continue listening for next connection
+                            }
+                            if (!noiseEncryption.isReady()) {
+                                android.util.Log.e("MainActivity", "Noise Protocol handshake incomplete");
+                                noiseEncryption.cleanup();
+                                acceptedSocket.close();
+                                continue; // Continue listening for next connection
+                            }
+                            android.util.Log.i("MainActivity", "Noise Protocol encryption established");
+                        } catch (IOException e) {
+                            android.util.Log.e("MainActivity", "Noise Protocol handshake error", e);
+                            noiseEncryption.cleanup();
+                            acceptedSocket.close();
+                            continue; // Continue listening for next connection
+                        }
+
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            statusText.setText("Connected to X11 streamer");
+                            Toast.makeText(MainActivity.this, "X11 server connected", Toast.LENGTH_SHORT).show();
+                            // Clear the connection info from TV (frame receiver will start drawing)
+                            SurfaceHolder holder = surfaceView.getHolder();
+                            android.graphics.Canvas canvas = null;
                             try {
-                                holder.unlockCanvasAndPost(canvas);
-                            } catch (Exception e2) {
-                                e2.printStackTrace();
+                                canvas = holder.lockCanvas();
+                                if (canvas != null) {
+                                    canvas.drawColor(android.graphics.Color.BLACK);
+                                    holder.unlockCanvasAndPost(canvas);
+                                }
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                                if (canvas != null) {
+                                    try {
+                                        holder.unlockCanvasAndPost(canvas);
+                                    } catch (Exception e2) {
+                                        e2.printStackTrace();
+                                    }
+                                }
+                            }
+                        });
+
+                        // Query display capabilities - use TV if connected, otherwise phone display
+                        android.view.Display targetDisplay = getTargetDisplay();
+                        android.graphics.Point size = new android.graphics.Point();
+                        targetDisplay.getRealSize(size);
+
+                        // Get refresh rate from target display
+                        float refreshRate = targetDisplay.getRefreshRate();
+                        int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
+
+                        String displayName = null;
+                        Protocol.DisplayMode[] modes = null;
+
+                        // Try to get EDID information (Option 2: System Properties, Option 4: DRM)
+                        byte[] edidData = null;
+
+                        // Option 4: Try to get EDID from DRM/KMS directly (most reliable)
+                        try {
+                            edidData = EdidParser.getEdidFromDrm();
+                            if (edidData != null && edidData.length > 0) {
+                                android.util.Log.d("MainActivity", "Got EDID from DRM, size: " + edidData.length);
+                            }
+                        } catch (Exception e) {
+                            android.util.Log.w("MainActivity", "Failed to get EDID from DRM: " + e.getMessage());
+                        }
+
+                        // Option 2: Fallback to system properties
+                        if (edidData == null || edidData.length == 0) {
+                            try {
+                                edidData = EdidParser.getEdidFromSystemProperties();
+                                if (edidData != null && edidData.length > 0) {
+                                    android.util.Log.d("MainActivity", "Got EDID from system properties, size: " + edidData.length);
+                                }
+                            } catch (Exception e) {
+                                android.util.Log.w("MainActivity", "Failed to get EDID from system properties: " + e.getMessage());
                             }
                         }
-                    }
-                });
 
-                // Query display capabilities - use TV if connected, otherwise phone display
-                android.view.Display targetDisplay = getTargetDisplay();
-                android.graphics.Point size = new android.graphics.Point();
-                targetDisplay.getRealSize(size);
-
-                // Get refresh rate from target display
-                float refreshRate = targetDisplay.getRefreshRate();
-                int refreshRateInt = (int)(refreshRate * 100); // Convert to Hz * 100
-
-                String displayName = null;
-                Protocol.DisplayMode[] modes = null;
-
-                // Try to get EDID information (Option 2: System Properties, Option 4: DRM)
-                byte[] edidData = null;
-
-                // Option 4: Try to get EDID from DRM/KMS directly (most reliable)
-                try {
-                    edidData = EdidParser.getEdidFromDrm();
-                    if (edidData != null && edidData.length > 0) {
-                        android.util.Log.d("MainActivity", "Got EDID from DRM, size: " + edidData.length);
-                    }
-                } catch (Exception e) {
-                    android.util.Log.w("MainActivity", "Failed to get EDID from DRM: " + e.getMessage());
-                }
-
-                // Option 2: Fallback to system properties
-                if (edidData == null || edidData.length == 0) {
-                    try {
-                        edidData = EdidParser.getEdidFromSystemProperties();
+                        // Parse EDID if we got it
                         if (edidData != null && edidData.length > 0) {
-                            android.util.Log.d("MainActivity", "Got EDID from system properties, size: " + edidData.length);
+                            try {
+                                EdidParser.EdidInfo edidInfo = EdidParser.parseEdid(edidData);
+                                if (edidInfo != null && edidInfo.modes != null && edidInfo.modes.length > 0) {
+                                    displayName = edidInfo.displayName;
+                                    modes = edidInfo.modes;
+                                    android.util.Log.d("MainActivity", "Parsed EDID: " + displayName + ", " + modes.length + " modes");
+                                }
+                            } catch (Exception e) {
+                                android.util.Log.w("MainActivity", "Failed to parse EDID: " + e.getMessage());
+                            }
                         }
-                    } catch (Exception e) {
-                        android.util.Log.w("MainActivity", "Failed to get EDID from system properties: " + e.getMessage());
-                    }
-                }
 
-                // Parse EDID if we got it
-                if (edidData != null && edidData.length > 0) {
-                    try {
-                        EdidParser.EdidInfo edidInfo = EdidParser.parseEdid(edidData);
-                        if (edidInfo != null && edidInfo.modes != null && edidInfo.modes.length > 0) {
-                            displayName = edidInfo.displayName;
-                            modes = edidInfo.modes;
-                            android.util.Log.d("MainActivity", "Parsed EDID: " + displayName + ", " + modes.length + " modes");
+                        // Fallback: Use only what Android provides (current mode only)
+                        if (modes == null || modes.length == 0) {
+                            android.util.Log.d("MainActivity", "No EDID available, using current mode only");
+
+                            // Get display name from the target display
+                            displayName = targetDisplay.getName();
+                            if (displayName == null || displayName.isEmpty()) {
+                                if (isTvConnected()) {
+                                    displayName = "TV Display";
+                                } else {
+                                    displayName = "Phone Display";
+                                }
+                            }
+
+                            // Only report current mode (what we actually know)
+                            modes = new Protocol.DisplayMode[1];
+                            modes[0] = new Protocol.DisplayMode();
+                            modes[0].width = size.x;
+                            modes[0].height = size.y;
+                            modes[0].refreshRate = refreshRateInt;
                         }
-                    } catch (Exception e) {
-                        android.util.Log.w("MainActivity", "Failed to parse EDID: " + e.getMessage());
-                    }
-                }
 
-                // Fallback: Use only what Android provides (current mode only)
-                if (modes == null || modes.length == 0) {
-                    android.util.Log.d("MainActivity", "No EDID available, using current mode only");
+                        // Send HELLO with display name and modes
+                        Protocol.sendHello(acceptedSocket.getOutputStream(), displayName, modes);
 
-                    // Get display name from the target display
-                    displayName = targetDisplay.getName();
-                    if (displayName == null || displayName.isEmpty()) {
-                        if (isTvConnected()) {
-                            displayName = "TV Display";
+                        // Start frame receiver - use appropriate SurfaceHolder
+                        // If TV is connected, use TV's SurfaceView; otherwise use phone's SurfaceView
+                        SurfaceHolder targetHolder;
+                        if (tvSurfaceView != null && tvSurfaceView.getHolder() != null) {
+                            // TV is connected - use TV SurfaceView
+                            targetHolder = tvSurfaceView.getHolder();
                         } else {
-                            displayName = "Phone Display";
+                            // No TV - use phone SurfaceView
+                            targetHolder = surfaceView.getHolder();
                         }
+                        frameReceiver = new FrameReceiver(acceptedSocket, targetHolder, MainActivity.this);
+                        frameReceiver.setConfigCallback(config -> {
+                            // Handle config changes on main thread
+                            new Handler(Looper.getMainLooper()).post(() -> {
+                                if (config.width == 0 || config.height == 0) {
+                                    // Display disconnected
+                                    Toast.makeText(MainActivity.this,
+                                        "Display disconnected (no signal)",
+                                        Toast.LENGTH_SHORT).show();
+                                } else {
+                                    // Display resolution changed
+                                    Toast.makeText(MainActivity.this,
+                                        String.format("Resolution changed: %dx%d@%dHz",
+                                            config.width, config.height, config.refreshRate),
+                                        Toast.LENGTH_SHORT).show();
+                                }
+                            });
+                        });
+                        frameReceiver.start();
+
+                        // Wait for frame receiver to finish (connection closed)
+                        try {
+                            frameReceiver.join();
+                        } catch (InterruptedException e) {
+                            android.util.Log.w("MainActivity", "Frame receiver thread interrupted");
+                        }
+
+                        // Connection ended - clean up and continue listening
+                        frameReceiver = null;
+                        clientSocket = null;
+
+                        // Restore listening display
+                        final String ipListRestore = String.join("\n", localIps);
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            String displayText = ipListRestore + "\nPort: " + port + "\nPIN: " + String.format("%04d", pinCode);
+                            statusText.setText(displayText);
+                            displayConnectionInfoOnTV(port, firstIp, pinCode);
+                        });
+
+                    } catch (IOException e) {
+                        android.util.Log.e("MainActivity", "Error accepting connection", e);
+                        if (acceptedSocket != null) {
+                            try {
+                                acceptedSocket.close();
+                            } catch (IOException e2) {
+                                // Ignore
+                            }
+                        }
+                        // Continue listening for next connection
+                    } catch (Exception e) {
+                        android.util.Log.e("MainActivity", "Unexpected error handling connection", e);
+                        if (acceptedSocket != null) {
+                            try {
+                                acceptedSocket.close();
+                            } catch (IOException e2) {
+                                // Ignore
+                            }
+                        }
+                        // Continue listening for next connection
                     }
-
-                    // Only report current mode (what we actually know)
-                    modes = new Protocol.DisplayMode[1];
-                    modes[0] = new Protocol.DisplayMode();
-                    modes[0].width = size.x;
-                    modes[0].height = size.y;
-                    modes[0].refreshRate = refreshRateInt;
                 }
-
-                // Send HELLO with display name and modes
-                Protocol.sendHello(clientSocket.getOutputStream(), displayName, modes);
-
-                // Start frame receiver - use appropriate SurfaceHolder
-                // If TV is connected, use TV's SurfaceView; otherwise use phone's SurfaceView
-                SurfaceHolder targetHolder;
-                if (tvSurfaceView != null && tvSurfaceView.getHolder() != null) {
-                    // TV is connected - use TV SurfaceView
-                    targetHolder = tvSurfaceView.getHolder();
-                } else {
-                    // No TV - use phone SurfaceView
-                    targetHolder = surfaceView.getHolder();
-                }
-                frameReceiver = new FrameReceiver(clientSocket, targetHolder, MainActivity.this);
-                frameReceiver.setConfigCallback(config -> {
-                    // Handle config changes on main thread
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        if (config.width == 0 || config.height == 0) {
-                            // Display disconnected
-                            Toast.makeText(MainActivity.this,
-                                "Display disconnected (no signal)",
-                                Toast.LENGTH_SHORT).show();
-                        } else {
-                            // Display resolution changed
-                            Toast.makeText(MainActivity.this,
-                                String.format("Resolution changed: %dx%d@%dHz",
-                                    config.width, config.height, config.refreshRate),
-                                Toast.LENGTH_SHORT).show();
-                        }
-                    });
-                });
-                frameReceiver.start();
-
             } catch (IOException e) {
-                e.printStackTrace();
+                android.util.Log.e("MainActivity", "Server socket error", e);
                 new Handler(Looper.getMainLooper()).post(() -> {
                     if (listening) {
                         Toast.makeText(MainActivity.this, "Server error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                        statusText.setText("Error: " + e.getMessage());
                     }
-                });
-            } finally {
-                listening = false;
-                new Handler(Looper.getMainLooper()).post(() -> {
-                    startStopButton.setText("Start Listening");
-                    listenPortEdit.setEnabled(true);
-                    statusText.setText("Not listening");
                 });
             }
         });
@@ -338,8 +369,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         // Stop UDP listener
         stopUdpBroadcastListener();
 
-        startStopButton.setText("Start Listening");
-        listenPortEdit.setEnabled(true);
         Toast.makeText(this, "Stopped listening", Toast.LENGTH_SHORT).show();
     }
 
@@ -483,24 +512,31 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         }
     }
 
-    private String getLocalIpAddress() {
+    private java.util.List<String> getAllLocalIpAddresses() {
+        java.util.List<String> ipList = new java.util.ArrayList<>();
         try {
             java.util.Enumeration<java.net.NetworkInterface> interfaces =
                 java.net.NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 java.net.NetworkInterface iface = interfaces.nextElement();
+                // Skip interfaces that are down
+                if (!iface.isUp()) continue;
+
                 java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
                     java.net.InetAddress addr = addresses.nextElement();
                     if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
-                        return addr.getHostAddress();
+                        ipList.add(addr.getHostAddress());
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (java.net.SocketException e) {
+            android.util.Log.e("MainActivity", "Error getting network interfaces", e);
         }
-        return "Unknown";
+        if (ipList.isEmpty()) {
+            ipList.add("0.0.0.0");
+        }
+        return ipList;
     }
 
     private void displayConnectionInfoOnTV(int port, String ip, int pin) {

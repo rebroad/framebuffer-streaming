@@ -31,22 +31,11 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Not listening"
-            android:textSize="14sp"
-            android:padding="8dp" />
-
-        <EditText
-            android:id="@+id/serverPort"
-            android:layout_width="200dp"
-            android:layout_height="wrap_content"
-            android:hint="Listen Port"
-            android:inputType="number"
-            android:text="4321" />
-
-        <Button
-            android:id="@+id/connectButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Start Listening" />
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="@android:color/white"
+            android:padding="16dp"
+            android:background="#80000000" />
 
     </LinearLayout>
 

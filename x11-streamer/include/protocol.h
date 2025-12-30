@@ -113,5 +113,10 @@ typedef struct __attribute__((packed)) {
 int protocol_send_message(int fd, message_type_t type, const void *data, size_t data_len);
 int protocol_receive_message(int fd, message_header_t *header, void **payload);
 
+// Encrypted versions (require Noise Protocol context)
+// These functions encrypt/decrypt messages using Noise Protocol Framework
+int protocol_send_message_encrypted(void *noise_ctx, int fd, message_type_t type, const void *data, size_t data_len);
+int protocol_receive_message_encrypted(void *noise_ctx, int fd, message_header_t *header, void **payload);
+
 #endif // PROTOCOL_H
 
