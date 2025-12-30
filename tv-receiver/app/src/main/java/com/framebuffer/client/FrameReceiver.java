@@ -110,7 +110,7 @@ public class FrameReceiver extends Thread {
                         } else {
                             // Handle full frame (backward compatible)
                             byte[] pixels = new byte[frame.size];
-                            read = 0;
+                            int read = 0;
                             while (read < frame.size) {
                                 int n = in.read(pixels, read, frame.size - read);
                                 if (n < 0) break;
