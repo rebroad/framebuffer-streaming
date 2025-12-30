@@ -12,7 +12,6 @@ import java.net.Socket;
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     private SurfaceView surfaceView;
-    private android.widget.TextView statusText;
 
     private java.net.ServerSocket serverSocket;
     private Socket clientSocket;
@@ -35,7 +34,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         setContentView(R.layout.activity_main);
 
         surfaceView = findViewById(R.id.surfaceView);
-        statusText = findViewById(R.id.statusText);
 
         surfaceView.getHolder().addCallback(this);
 
@@ -178,7 +176,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         }
 
                         new Handler(Looper.getMainLooper()).post(() -> {
-                            statusText.setText("Connected to X11 streamer");
+                            // Connection status is shown on SurfaceView, no need for TextView
                             Toast.makeText(MainActivity.this, "X11 server connected", Toast.LENGTH_SHORT).show();
                             // Clear the connection info from TV (frame receiver will start drawing)
                             SurfaceHolder holder = surfaceView.getHolder();
@@ -364,14 +362,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 android.util.Log.e("MainActivity", "Failed to bind ServerSocket to port " + port + ": " + e.getMessage(), e);
                 new Handler(Looper.getMainLooper()).post(() -> {
                     Toast.makeText(MainActivity.this, "Failed to bind to port " + port + ": " + e.getMessage(), Toast.LENGTH_LONG).show();
-                    statusText.setText("Error: Failed to bind to port " + port);
+                    // Error shown via Toast, SurfaceView shows connection info
                 });
             } catch (IOException e) {
                 android.util.Log.e("MainActivity", "Server socket error", e);
                 new Handler(Looper.getMainLooper()).post(() -> {
                     if (listening) {
                         Toast.makeText(MainActivity.this, "Server error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                        statusText.setText("Error: " + e.getMessage());
+                        // Error will be shown via Toast, SurfaceView shows connection info
                     }
                 });
             }

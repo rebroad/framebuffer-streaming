@@ -6,16 +6,38 @@ android {
     namespace 'com.framebuffer.client'
     compileSdk 34
 
-    // Auto-increment version code on each build
+    // Auto-increment version code only when source files change
     def versionPropsFile = file('version.properties')
     def versionProps = new Properties()
     if (versionPropsFile.canRead()) {
         versionProps.load(new FileInputStream(versionPropsFile))
     } else {
         versionProps['VERSION_CODE'] = '1'
+        versionProps['LAST_BUILD_TIME'] = '0'
     }
     def versionCode = Integer.parseInt(versionProps['VERSION_CODE'] ?: '1')
-    versionProps['VERSION_CODE'] = (versionCode + 1).toString()
+    def lastBuildTime = Long.parseLong(versionProps['LAST_BUILD_TIME'] ?: '0')
+
+    // Check if any source files changed since last build
+    def sourceChanged = false
+    def sourceDirs = ['src/main/java', 'src/main/cpp', 'src/main/res']
+    sourceDirs.each { dir ->
+        def dirFile = file(dir)
+        if (dirFile.exists()) {
+            dirFile.eachFileRecurse { file ->
+                if (file.isFile() && file.lastModified() > lastBuildTime) {
+                    sourceChanged = true
+                }
+            }
+        }
+    }
+
+    // Only increment if source changed or first build
+    if (sourceChanged || lastBuildTime == 0) {
+        versionCode = versionCode + 1
+        versionProps['VERSION_CODE'] = versionCode.toString()
+    }
+    versionProps['LAST_BUILD_TIME'] = System.currentTimeMillis().toString()
     versionProps.store(versionPropsFile.newWriter(), null)
 
     // Conditionally enable native build if NDK is properly configured
