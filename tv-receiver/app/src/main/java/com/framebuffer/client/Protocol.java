@@ -73,7 +73,7 @@ public class Protocol {
     }
 
     public static int sendMessage(OutputStream out, byte type, byte[] data) throws IOException {
-        ByteBuffer header = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer header = ByteBuffer.allocate(9).order(ByteOrder.BIG_ENDIAN);
         header.put(type);
         header.putInt(data != null ? data.length : 0);
         header.putInt(0); // sequence
@@ -92,7 +92,7 @@ public class Protocol {
         int displayNameLen = displayNameBytes.length + 1; // Include null terminator
 
         int payloadSize = 4 + displayNameLen + (modes != null ? modes.length * 12 : 0);
-        ByteBuffer payload = ByteBuffer.allocate(payloadSize).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer payload = ByteBuffer.allocate(payloadSize).order(ByteOrder.BIG_ENDIAN);
 
         // Protocol version
         payload.putShort((short)1);
@@ -116,7 +116,7 @@ public class Protocol {
     }
 
     public static MessageHeader parseHeader(byte[] headerBytes) {
-        ByteBuffer header = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer header = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN);
         MessageHeader msg = new MessageHeader();
         msg.type = header.get();
         msg.length = header.getInt();
@@ -135,7 +135,7 @@ public class Protocol {
             read += n;
         }
 
-        ByteBuffer header = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer header = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN);
         MessageHeader msg = new MessageHeader();
         msg.type = header.get();
         msg.length = header.getInt();
@@ -144,7 +144,7 @@ public class Protocol {
     }
 
     public static FrameMessage parseFrameMessage(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
         FrameMessage frame = new FrameMessage();
         frame.timestampUs = buf.getLong();
         frame.outputId = buf.getInt();
@@ -165,7 +165,7 @@ public class Protocol {
     }
 
     public static DirtyRectangle parseDirtyRectangle(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
         DirtyRectangle rect = new DirtyRectangle();
         rect.x = buf.getInt();
         rect.y = buf.getInt();
@@ -176,7 +176,7 @@ public class Protocol {
     }
 
     public static AudioMessage parseAudioMessage(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
         AudioMessage audio = new AudioMessage();
         audio.timestampUs = buf.getLong();
         audio.sampleRate = buf.getInt();
@@ -187,7 +187,7 @@ public class Protocol {
     }
 
     public static ConfigMessage parseConfigMessage(byte[] data) {
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
         ConfigMessage config = new ConfigMessage();
         config.outputId = buf.getInt();
         config.width = buf.getInt();

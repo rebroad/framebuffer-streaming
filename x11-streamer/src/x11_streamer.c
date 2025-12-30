@@ -33,6 +33,9 @@ typedef struct tv_connection {
     RROutput virtual_output_id;  // Virtual XR output created for this TV
     char display_name[64];
     bool paused;  // True when receiver has no surface (paused sending frames)
+    // Pre-received HELLO message (when encryption is disabled, HELLO is received before thread starts)
+    message_header_t hello_header;
+    void *hello_payload;
 } tv_connection_t;
 
 struct x11_streamer {
@@ -94,48 +97,61 @@ static void *tv_receiver_thread(void *arg)
     message_header_t header;
     void *payload = NULL;
 
-    // TV receiver sends HELLO first
-    // Validate protocol by checking the first message
+    // Check if HELLO was already received (when encryption is disabled)
+    if (streamer->tv_conn && streamer->tv_conn->hello_payload) {
+        // Use pre-received HELLO
+        header = streamer->tv_conn->hello_header;
+        payload = streamer->tv_conn->hello_payload;
+        streamer->tv_conn->hello_payload = NULL;  // Clear so we don't free it twice
+    } else {
+        // TV receiver sends HELLO first (when encryption is enabled)
+        // Validate protocol by checking the first message
 
-    // Receive TV HELLO with timeout to detect invalid protocols
-    struct pollfd pfd = {.fd = streamer->tv_fd, .events = POLLIN};
-    int poll_ret = poll(&pfd, 1, 2000);  // 2 second timeout
-    if (poll_ret <= 0) {
-        if (poll_ret == 0) {
-            fprintf(stderr, "TV receiver handshake timeout (no response or invalid protocol)\n");
-        } else {
-            perror("poll");
+        // Receive TV HELLO with timeout to detect invalid protocols
+        struct pollfd pfd = {.fd = streamer->tv_fd, .events = POLLIN};
+        int poll_ret = poll(&pfd, 1, 2000);  // 2 second timeout
+        if (poll_ret <= 0) {
+            if (poll_ret == 0) {
+                fprintf(stderr, "TV receiver handshake timeout (no response or invalid protocol)\n");
+            } else {
+                perror("poll");
+            }
+            goto cleanup;
         }
-        goto cleanup;
-    }
 
-    int ret = streamer_receive_message(streamer, &header, &payload);
-    if (ret <= 0) {
-        fprintf(stderr, "TV receiver handshake failed: connection closed or invalid data\n");
-        goto cleanup;
-    }
+        int ret = streamer_receive_message(streamer, &header, &payload);
+        if (ret <= 0) {
+            fprintf(stderr, "TV receiver handshake failed: connection closed or invalid data\n");
+            goto cleanup;
+        }
 
-    // Validate protocol: must be MSG_HELLO
-    if (header.type != MSG_HELLO) {
-        fprintf(stderr, "TV receiver protocol mismatch: expected MSG_HELLO (0x%02x), got 0x%02x\n",
-                MSG_HELLO, header.type);
-        if (payload)
-            free(payload);
-        goto cleanup;
-    }
+        // Validate protocol: must be MSG_HELLO
+        if (header.type != MSG_HELLO) {
+            fprintf(stderr, "TV receiver protocol mismatch: expected MSG_HELLO (0x%02x), got 0x%02x\n",
+                    MSG_HELLO, header.type);
+            if (payload)
+                free(payload);
+            goto cleanup;
+        }
 
-    // Validate HELLO message structure
-    if (!payload || header.length < sizeof(hello_message_t)) {
-        fprintf(stderr, "TV receiver handshake failed: invalid HELLO message format\n");
-        if (payload)
-            free(payload);
-        goto cleanup;
+        // Validate HELLO message structure
+        if (!payload || header.length < sizeof(hello_message_t)) {
+            fprintf(stderr, "TV receiver handshake failed: invalid HELLO message format\n");
+            if (payload)
+                free(payload);
+            goto cleanup;
+        }
     }
 
     if (payload && header.length >= sizeof(hello_message_t)) {
         hello_message_t *hello_msg = (hello_message_t *)payload;
         char *display_name = NULL;
         display_mode_t *modes = NULL;
+
+        // Convert from network byte order
+        hello_msg->protocol_version = ntohs(hello_msg->protocol_version);
+        hello_msg->num_modes = ntohs(hello_msg->num_modes);
+        hello_msg->display_name_len = ntohs(hello_msg->display_name_len);
 
         // Parse display name (comes right after hello_message_t)
         if (hello_msg->display_name_len > 0 &&
@@ -162,6 +178,12 @@ static void *tv_receiver_thread(void *arg)
         if (hello_msg->num_modes > 0 &&
             header.length >= offset + hello_msg->num_modes * sizeof(display_mode_t)) {
             modes = (display_mode_t *)((char *)payload + offset);
+            // Convert display modes from network byte order
+            for (int i = 0; i < hello_msg->num_modes; i++) {
+                modes[i].width = ntohl(modes[i].width);
+                modes[i].height = ntohl(modes[i].height);
+                modes[i].refresh_rate = ntohl(modes[i].refresh_rate);
+            }
         }
 
         printf("TV receiver connected: version=%d, display='%s', modes=%d\n",
@@ -284,7 +306,7 @@ static void *tv_receiver_thread(void *arg)
 
     // Main TV receiver communication loop
     while (streamer->running) {
-        ret = streamer_receive_message(streamer, &header, &payload);
+        int ret = streamer_receive_message(streamer, &header, &payload);
         if (ret <= 0) {
             if (ret == 0)
                 printf("TV receiver disconnected\n");
@@ -398,9 +420,10 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         }
     }
 
-    // Prepare frame message
+    // Prepare frame message (will convert to network byte order before sending)
+    uint64_t timestamp_us = audio_get_timestamp_us();
     frame_message_t frame = {
-        .timestamp_us = audio_get_timestamp_us(),
+        .timestamp_us = timestamp_us,  // uint64 - need manual conversion
         .output_id = output->output_id,
         .width = fb->width,
         .height = fb->height,
@@ -461,8 +484,21 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         frame.size = fb->size;
     }
 
+    // Convert frame message to network byte order before sending
+    frame_message_t frame_net = frame;
+    // Convert uint64 timestamp (split into two uint32 and convert)
+    uint32_t timestamp_low = (uint32_t)(frame.timestamp_us & 0xFFFFFFFF);
+    uint32_t timestamp_high = (uint32_t)((frame.timestamp_us >> 32) & 0xFFFFFFFF);
+    frame_net.timestamp_us = ((uint64_t)htonl(timestamp_high) << 32) | htonl(timestamp_low);
+    frame_net.output_id = htonl(frame.output_id);
+    frame_net.width = htonl(frame.width);
+    frame_net.height = htonl(frame.height);
+    frame_net.format = htonl(frame.format);
+    frame_net.pitch = htonl(frame.pitch);
+    frame_net.size = htonl(frame.size);
+
     // Send frame header
-    if (streamer_send_message(streamer, MSG_FRAME, &frame, sizeof(frame)) < 0) {
+    if (streamer_send_message(streamer, MSG_FRAME, &frame_net, sizeof(frame_net)) < 0) {
         printf("Failed to send frame to TV receiver\n");
         streamer->running = false;
         return;
@@ -482,11 +518,11 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         // Send dirty rectangles
         for (int i = 0; i < num_dirty_rects; i++) {
             dirty_rectangle_t rect_msg = {
-                .x = dirty_rects[i].x,
-                .y = dirty_rects[i].y,
-                .width = dirty_rects[i].width,
-                .height = dirty_rects[i].height,
-                .data_size = dirty_rects[i].width * dirty_rects[i].height * fb->bpp
+                .x = htonl(dirty_rects[i].x),
+                .y = htonl(dirty_rects[i].y),
+                .width = htonl(dirty_rects[i].width),
+                .height = htonl(dirty_rects[i].height),
+                .data_size = htonl(dirty_rects[i].width * dirty_rects[i].height * fb->bpp)
             };
 
             // Send rectangle header
@@ -685,14 +721,23 @@ static void streamer_capture_and_send_audio(x11_streamer_t *streamer)
 
     int ret = audio_capture_read(streamer->audio_capture, &audio_data, &audio_size);
     if (ret > 0 && audio_data && audio_size > 0) {
-        // Create audio message
+        // Create audio message (convert to network byte order)
+        uint64_t audio_timestamp_us = audio_get_timestamp_us();
         audio_message_t audio_msg = {
-            .timestamp_us = audio_get_timestamp_us(),
+            .timestamp_us = audio_timestamp_us,  // uint64 - need manual conversion
             .sample_rate = 48000,
             .channels = 2,
             .format = AUDIO_FORMAT_PCM_S16LE,
             .data_size = audio_size
         };
+        // Convert to network byte order
+        uint32_t audio_ts_low = (uint32_t)(audio_msg.timestamp_us & 0xFFFFFFFF);
+        uint32_t audio_ts_high = (uint32_t)((audio_msg.timestamp_us >> 32) & 0xFFFFFFFF);
+        audio_msg.timestamp_us = ((uint64_t)htonl(audio_ts_high) << 32) | htonl(audio_ts_low);
+        audio_msg.sample_rate = htonl(audio_msg.sample_rate);
+        audio_msg.channels = htons(audio_msg.channels);
+        audio_msg.format = htons(audio_msg.format);
+        audio_msg.data_size = htonl(audio_msg.data_size);
 
         // Send audio header
         if (streamer_send_message(streamer, MSG_AUDIO, &audio_msg, sizeof(audio_msg)) < 0) {
@@ -738,10 +783,10 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
 
         // Send CONFIG message to TV receiver
         config_message_t config = {
-            .output_id = output->output_id,
-            .width = output->width,
-            .height = output->height,
-            .refresh_rate = output->refresh_rate
+            .output_id = htonl(output->output_id),
+            .width = htonl(output->width),
+            .height = htonl(output->height),
+            .refresh_rate = htonl(output->refresh_rate)
         };
 
         streamer_send_message(streamer, MSG_CONFIG, &config, sizeof(config));
@@ -754,10 +799,10 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
         // Send CONFIG message with width=0, height=0 to indicate disconnect
         // or restore resolution to indicate reconnect
         config_message_t config = {
-            .output_id = output->output_id,
-            .width = output->connected ? output->width : 0,
-            .height = output->connected ? output->height : 0,
-            .refresh_rate = output->connected ? output->refresh_rate : 0
+            .output_id = htonl(output->output_id),
+            .width = htonl(output->connected ? output->width : 0),
+            .height = htonl(output->connected ? output->height : 0),
+            .refresh_rate = htonl(output->connected ? output->refresh_rate : 0)
         };
 
         streamer_send_message(streamer, MSG_CONFIG, &config, sizeof(config));
@@ -1409,7 +1454,7 @@ int x11_streamer_run(x11_streamer_t *streamer)
         uint16_t pin = (uint16_t)atoi(pin_str);
 
         // Send PIN verification over encrypted channel
-        pin_verify_t pin_msg = {.pin = pin};
+        pin_verify_t pin_msg = {.pin = htons(pin)};  // Convert to network byte order
         if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
             fprintf(stderr, "Failed to send PIN verification\n");
             noise_encryption_cleanup(streamer->noise_ctx);
@@ -1438,8 +1483,43 @@ int x11_streamer_run(x11_streamer_t *streamer)
         streamer->noise_ctx = NULL;
         printf("Encryption not required by TV receiver (USB tethering) - using unencrypted connection\n");
         printf("DMA-BUF zero-copy enabled for better performance\n");
-        printf("Debug: Waiting for HELLO message from TV receiver...\n");
     }
+
+    // Receive HELLO message before starting the thread (TV receiver sends it immediately after CAPABILITIES)
+    printf("Debug: Waiting for HELLO message from TV receiver...\n");
+    message_header_t hello_header;
+    void *hello_payload = NULL;
+    int hello_ret = protocol_receive_message(streamer->tv_fd, &hello_header, &hello_payload);
+    if (hello_ret <= 0 || hello_header.type != MSG_HELLO) {
+        fprintf(stderr, "TV receiver handshake failed: expected HELLO, got type 0x%02x\n",
+                hello_ret > 0 ? hello_header.type : 0);
+        if (hello_payload) free(hello_payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    // Validate HELLO message structure
+    if (!hello_payload || hello_header.length < sizeof(hello_message_t)) {
+        fprintf(stderr, "TV receiver handshake failed: invalid HELLO message format\n");
+        if (hello_payload) free(hello_payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    // Store HELLO payload for tv_receiver_thread to process
+    streamer->tv_conn = calloc(1, sizeof(tv_connection_t));
+    if (!streamer->tv_conn) {
+        fprintf(stderr, "Failed to allocate TV connection structure\n");
+        if (hello_payload) free(hello_payload);
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+    streamer->tv_conn->hello_payload = hello_payload;
+    streamer->tv_conn->hello_header = hello_header;
+    streamer->tv_conn->paused = false;
 
     // Start TV receiver thread to handle communication
     streamer->running = true;

@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>  // For htonl/ntohl, htons/ntohs
 #include <stdatomic.h>
 
 // Per-connection sequence counter (thread-safe, per connection)
@@ -15,8 +16,8 @@ int protocol_send_message(int fd, message_type_t type, const void *data, size_t 
 {
     message_header_t header = {
         .type = type,
-        .length = data_len,
-        .sequence = sequence_counter++
+        .length = htonl((uint32_t)data_len),  // Convert to network byte order
+        .sequence = htonl(sequence_counter++)  // Convert to network byte order
     };
 
     // Send header
@@ -46,6 +47,10 @@ int protocol_receive_message(int fd, message_header_t *header, void **payload)
             return 0;  // Connection closed
         return -1;
     }
+
+    // Convert from network byte order
+    header->length = ntohl(header->length);
+    header->sequence = ntohl(header->sequence);
 
     // Allocate and receive payload
     if (header->length > 0) {
@@ -80,8 +85,8 @@ int protocol_send_message_encrypted(void *noise_ctx, int fd, message_type_t type
 
     message_header_t header = {
         .type = type,
-        .length = data_len,
-        .sequence = sequence_counter++
+        .length = htonl((uint32_t)data_len),  // Convert to network byte order
+        .sequence = htonl(sequence_counter++)  // Convert to network byte order
     };
 
     // Encrypt and send header
@@ -117,6 +122,10 @@ int protocol_receive_message_encrypted(void *noise_ctx, int fd, message_header_t
             return 0;  // Connection closed
         return -1;
     }
+
+    // Convert from network byte order
+    header->length = ntohl(header->length);
+    header->sequence = ntohl(header->sequence);
 
     // Allocate and receive payload
     if (header->length > 0) {

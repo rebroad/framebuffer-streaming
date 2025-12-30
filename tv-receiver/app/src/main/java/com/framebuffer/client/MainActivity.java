@@ -513,7 +513,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private void startUdpBroadcastListener(int tcpPort, String localIp) {
         udpListenerThread = new Thread(() -> {
             try {
-                udpSocket = new java.net.DatagramSocket(4321);  // Default broadcast port
+                // Bind to IPv4 address (0.0.0.0) to receive IPv4 broadcasts
+                udpSocket = new java.net.DatagramSocket();
+                udpSocket.bind(new java.net.InetSocketAddress("0.0.0.0", 4321));  // Default broadcast port
                 udpSocket.setBroadcast(true);
                 udpSocket.setReuseAddress(true);
 
