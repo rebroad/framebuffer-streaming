@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/types.h>  // For ssize_t
 
 // Noise Protocol Framework encryption context
 typedef struct noise_encryption_context noise_encryption_context_t;

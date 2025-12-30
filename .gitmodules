@@ -1,0 +1,6 @@
+[submodule "third_party/snow"]
+	path = third_party/snow
+	url = https://github.com/mcginty/snow.git
+[submodule "third_party/noise-c"]
+	path = third_party/noise-c
+	url = https://github.com/rweather/noise-c.git

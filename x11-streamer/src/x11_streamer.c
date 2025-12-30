@@ -50,6 +50,7 @@ struct x11_streamer {
     dirty_rect_context_t *dirty_rect_ctx;  // For dirty rectangle detection
     uint8_t encoding_mode;  // Current encoding mode (0=full, 1=dirty rects, 2=H.264)
     encoding_metrics_t *metrics;  // Metrics for adaptive switching
+    bool enable_encryption;  // Whether encryption is enabled (from options)
     noise_encryption_context_t *noise_ctx;  // Noise Protocol encryption context
 #ifdef HAVE_X264
     h264_encoder_t *h264_encoder;  // H.264 encoder (when mode=2)
@@ -72,6 +73,16 @@ static inline int streamer_receive_message(x11_streamer_t *streamer, message_hea
         return protocol_receive_message_encrypted(streamer->noise_ctx, streamer->tv_fd, header, payload);
     } else {
         return protocol_receive_message(streamer->tv_fd, header, payload);
+    }
+}
+
+// Helper function to send raw data (encrypted if available)
+static inline int streamer_send_raw(x11_streamer_t *streamer, const void *data, size_t data_len)
+{
+    if (streamer->noise_ctx && noise_encryption_is_ready(streamer->noise_ctx)) {
+        return noise_encryption_send(streamer->noise_ctx, streamer->tv_fd, data, data_len);
+    } else {
+        return send(streamer->tv_fd, data, data_len, MSG_NOSIGNAL) == (ssize_t)data_len ? 0 : -1;
     }
 }
 
@@ -251,7 +262,7 @@ static void *tv_receiver_thread(void *arg)
 
     // Main TV receiver communication loop
     while (streamer->running) {
-        ret = protocol_receive_message(streamer->tv_fd, &header, &payload);
+        ret = streamer_receive_message(streamer, &header, &payload);
         if (ret <= 0) {
             if (ret == 0)
                 printf("TV receiver disconnected\n");
@@ -421,11 +432,11 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         return;
     }
 
-    // Send frame data
+    // Send frame data (encrypted if available)
 #ifdef HAVE_X264
     if (encoding_mode == ENCODING_MODE_H264 && h264_data && h264_size > 0) {
         // Send H.264 encoded data
-        if (send(streamer->tv_fd, h264_data, h264_size, MSG_NOSIGNAL) != (ssize_t)h264_size) {
+        if (streamer_send_raw(streamer, h264_data, h264_size) < 0) {
             printf("Failed to send H.264 data\n");
         }
         free(h264_data);
@@ -443,7 +454,7 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
             };
 
             // Send rectangle header
-            if (send(streamer->tv_fd, &rect_msg, sizeof(rect_msg), MSG_NOSIGNAL) != sizeof(rect_msg)) {
+            if (streamer_send_raw(streamer, &rect_msg, sizeof(rect_msg)) < 0) {
                 printf("Failed to send dirty rectangle header\n");
                 return;
             }
@@ -454,7 +465,7 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
             size_t rect_pitch = dirty_rects[i].width * fb->bpp;
 
             for (uint32_t y = 0; y < dirty_rects[i].height; y++) {
-                if (send(streamer->tv_fd, src + y * fb->pitch, rect_pitch, MSG_NOSIGNAL) != (ssize_t)rect_pitch) {
+                if (streamer_send_raw(streamer, src + y * fb->pitch, rect_pitch) < 0) {
                     printf("Failed to send dirty rectangle data\n");
                     return;
                 }
@@ -462,6 +473,8 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         }
     } else if (fb->dma_fd >= 0) {
         // Send DMA-BUF FD via ancillary data (full frame only)
+        // Note: Ancillary data cannot be encrypted, but this is only used for zero-copy optimization
+        // The FD itself is not sensitive data - it's just a handle
         struct msghdr msg = {0};
         struct iovec iov;
         char buf[CMSG_SPACE(sizeof(int))];
@@ -488,7 +501,9 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         }
     } else if (frame_data) {
         // Send mapped data (full frame)
-        send(streamer->tv_fd, frame_data, frame_data_size, MSG_NOSIGNAL);
+        if (streamer_send_raw(streamer, frame_data, frame_data_size) < 0) {
+            printf("Failed to send frame data\n");
+        }
     }
 
     // Calculate encoding time and bytes sent
@@ -594,16 +609,20 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
     }
 
     // For dirty rectangles and H.264, we need mapped data, so always map
-    // For full frame mode, prefer DMA-BUF for zero-copy
+    // For full frame mode: prefer DMA-BUF for zero-copy, BUT disable it when encryption is enabled
+    // (encryption requires copying data to encrypt it, so zero-copy doesn't help)
     if (streamer->encoding_mode == ENCODING_MODE_DIRTY_RECTS ||
-        streamer->encoding_mode == ENCODING_MODE_H264) {
-        // Always map for dirty rectangle detection or H.264 encoding
+        streamer->encoding_mode == ENCODING_MODE_H264 ||
+        streamer->enable_encryption) {
+        // Always map when:
+        // 1. Dirty rectangles or H.264 encoding (need mapped data)
+        // 2. Encryption is enabled (need to copy data to encrypt it)
         if (drm_fb_map(fb) < 0) {
             drm_fb_close(fb);
             return;
         }
     } else {
-        // Try to export as DMA-BUF (preferred method for full frame)
+        // Try to export as DMA-BUF (preferred method for full frame, unencrypted)
         if (drm_fb_export_dma_buf(fb) < 0) {
             // Fallback: map the framebuffer
             if (drm_fb_map(fb) < 0) {
@@ -646,8 +665,8 @@ static void streamer_capture_and_send_audio(x11_streamer_t *streamer)
             return;
         }
 
-        // Send audio data
-        if (send(streamer->tv_fd, audio_data, audio_size, MSG_NOSIGNAL) != (ssize_t)audio_size) {
+        // Send audio data (encrypted if available)
+        if (streamer_send_raw(streamer, audio_data, audio_size) < 0) {
             printf("Failed to send audio data\n");
         }
 
@@ -727,6 +746,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
         opts.host = NULL;
         opts.port = DEFAULT_TV_PORT;
         opts.broadcast_timeout_ms = 5000;
+        opts.enable_encryption = true;  // Default: enable encryption
     }
 
     // If host is specified, disable broadcast
@@ -739,6 +759,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     }
     streamer->tv_port = opts.port;
     streamer->broadcast_timeout_ms = opts.broadcast_timeout_ms;
+    streamer->enable_encryption = opts.enable_encryption;
     streamer->tv_fd = -1;
     streamer->x11_ctx = x11_context_create();
     if (!streamer->x11_ctx) {
@@ -1095,74 +1116,81 @@ int x11_streamer_run(x11_streamer_t *streamer)
     printf("Connected to TV receiver\n");
 
     // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
-    streamer->noise_ctx = noise_encryption_init(true);  // Streamer is initiator
-    if (!streamer->noise_ctx) {
-        fprintf(stderr, "Failed to initialize Noise Protocol encryption\n");
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
+    // Only if encryption is enabled
+    if (streamer->enable_encryption) {
+        streamer->noise_ctx = noise_encryption_init(true);  // Streamer is initiator
+        if (!streamer->noise_ctx) {
+            fprintf(stderr, "Failed to initialize Noise Protocol encryption\n");
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
 
-    if (noise_encryption_handshake(streamer->noise_ctx, streamer->tv_fd) < 0) {
-        fprintf(stderr, "Noise Protocol handshake failed\n");
-        noise_encryption_cleanup(streamer->noise_ctx);
-        streamer->noise_ctx = NULL;
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
+        if (noise_encryption_handshake(streamer->noise_ctx, streamer->tv_fd) < 0) {
+            fprintf(stderr, "Noise Protocol handshake failed\n");
+            noise_encryption_cleanup(streamer->noise_ctx);
+            streamer->noise_ctx = NULL;
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
 
-    if (!noise_encryption_is_ready(streamer->noise_ctx)) {
-        fprintf(stderr, "Noise Protocol handshake incomplete\n");
-        noise_encryption_cleanup(streamer->noise_ctx);
-        streamer->noise_ctx = NULL;
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
+        if (!noise_encryption_is_ready(streamer->noise_ctx)) {
+            fprintf(stderr, "Noise Protocol handshake incomplete\n");
+            noise_encryption_cleanup(streamer->noise_ctx);
+            streamer->noise_ctx = NULL;
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
 
-    printf("Noise Protocol encryption established\n");
+        printf("Noise Protocol encryption established\n");
 
-    // Now verify PIN over encrypted channel
-    printf("Enter PIN (4 digits, displayed on TV receiver): ");
-    fflush(stdout);
-    char pin_str[32];
-    if (!fgets(pin_str, sizeof(pin_str), stdin)) {
-        fprintf(stderr, "No PIN entered.\n");
-        noise_encryption_cleanup(streamer->noise_ctx);
-        streamer->noise_ctx = NULL;
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
-    uint16_t pin = (uint16_t)atoi(pin_str);
+        // Now verify PIN over encrypted channel
+        printf("Enter PIN (4 digits, displayed on TV receiver): ");
+        fflush(stdout);
+        char pin_str[32];
+        if (!fgets(pin_str, sizeof(pin_str), stdin)) {
+            fprintf(stderr, "No PIN entered.\n");
+            noise_encryption_cleanup(streamer->noise_ctx);
+            streamer->noise_ctx = NULL;
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
+        uint16_t pin = (uint16_t)atoi(pin_str);
 
-    // Send PIN verification over encrypted channel
-    pin_verify_t pin_msg = {.pin = pin};
-    if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
-        fprintf(stderr, "Failed to send PIN verification\n");
-        noise_encryption_cleanup(streamer->noise_ctx);
-        streamer->noise_ctx = NULL;
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
+        // Send PIN verification over encrypted channel
+        pin_verify_t pin_msg = {.pin = pin};
+        if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
+            fprintf(stderr, "Failed to send PIN verification\n");
+            noise_encryption_cleanup(streamer->noise_ctx);
+            streamer->noise_ctx = NULL;
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
 
-    // Wait for PIN verified response over encrypted channel
-    message_header_t header;
-    void *payload = NULL;
-    if (streamer_receive_message(streamer, &header, &payload) <= 0 ||
-        header.type != MSG_PIN_VERIFIED) {
-        fprintf(stderr, "PIN verification failed\n");
+        // Wait for PIN verified response over encrypted channel
+        message_header_t header;
+        void *payload = NULL;
+        if (streamer_receive_message(streamer, &header, &payload) <= 0 ||
+            header.type != MSG_PIN_VERIFIED) {
+            fprintf(stderr, "PIN verification failed\n");
+            if (payload) free(payload);
+            noise_encryption_cleanup(streamer->noise_ctx);
+            streamer->noise_ctx = NULL;
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
         if (payload) free(payload);
-        noise_encryption_cleanup(streamer->noise_ctx);
+        printf("PIN verified successfully\n");
+    } else {
         streamer->noise_ctx = NULL;
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
+        printf("Encryption disabled - using unencrypted connection (DMA-BUF zero-copy enabled)\n");
+        printf("Skipping PIN verification (encryption disabled)\n");
     }
-    if (payload) free(payload);
-    printf("PIN verified successfully\n");
 
     // Start TV receiver thread to handle communication
     streamer->running = true;
