@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <sys/select.h>
 
 typedef struct tv_connection {
     int fd;
@@ -1054,6 +1055,19 @@ static int discover_tv_receiver(x11_streamer_t *streamer, struct in_addr *found_
     return 0;
 }
 
+// Helper function to print connection debugging advice
+static void print_connection_debug(const char *error_msg, const char *addr_str, int port)
+{
+    if (error_msg && error_msg[0] != '\0') {
+        fprintf(stderr, "%s\n", error_msg);
+    }
+    fprintf(stderr, "Debug: Check if:\n");
+    fprintf(stderr, "  1. TV receiver is running and listening on port %d\n", port);
+    fprintf(stderr, "  2. Firewall allows connections on port %d\n", port);
+    fprintf(stderr, "  3. Device is on the same network\n");
+    fprintf(stderr, "  4. IP address %s is correct\n", addr_str);
+}
+
 int x11_streamer_run(x11_streamer_t *streamer)
 {
     if (!streamer)
@@ -1105,9 +1119,86 @@ int x11_streamer_run(x11_streamer_t *streamer)
     char addr_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, addr_str, sizeof(addr_str));
     printf("Connecting to TV receiver at %s:%d...\n", addr_str, streamer->tv_port);
+    printf("Debug: Resolved address: %s, port: %d (network byte order: %d)\n",
+           addr_str, streamer->tv_port, ntohs(addr.sin_port));
 
-    if (connect(streamer->tv_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("connect");
+    // Set socket to non-blocking temporarily to check connection status
+    int flags = fcntl(streamer->tv_fd, F_GETFL, 0);
+    if (flags < 0) {
+        perror("fcntl(F_GETFL)");
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    if (fcntl(streamer->tv_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl(F_SETFL)");
+        close(streamer->tv_fd);
+        streamer->tv_fd = -1;
+        return -1;
+    }
+
+    // Attempt connection
+    int connect_result = connect(streamer->tv_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (connect_result < 0) {
+        if (errno == EINPROGRESS) {
+            // Connection in progress, wait for it
+            fd_set write_fds;
+            struct timeval timeout;
+            FD_ZERO(&write_fds);
+            FD_SET(streamer->tv_fd, &write_fds);
+            timeout.tv_sec = 5;  // 5 second timeout
+            timeout.tv_usec = 0;
+
+            int select_result = select(streamer->tv_fd + 1, NULL, &write_fds, NULL, &timeout);
+            if (select_result > 0) {
+                // Check if connection succeeded
+                int so_error;
+                socklen_t len = sizeof(so_error);
+                if (getsockopt(streamer->tv_fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+                    perror("getsockopt(SO_ERROR)");
+                    close(streamer->tv_fd);
+                    streamer->tv_fd = -1;
+                    return -1;
+                }
+                if (so_error != 0) {
+                    errno = so_error;
+                    fprintf(stderr, "Connection failed: ");
+                    perror("connect");
+                    fprintf(stderr, "Debug: Error code: %d\n", so_error);
+                    print_connection_debug("", addr_str, streamer->tv_port);
+                    close(streamer->tv_fd);
+                    streamer->tv_fd = -1;
+                    return -1;
+                }
+                // Connection succeeded
+            } else if (select_result == 0) {
+                char timeout_msg[256];
+                snprintf(timeout_msg, sizeof(timeout_msg), "Connection timeout: No response from %s:%d", addr_str, streamer->tv_port);
+                print_connection_debug(timeout_msg, addr_str, streamer->tv_port);
+                close(streamer->tv_fd);
+                streamer->tv_fd = -1;
+                return -1;
+            } else {
+                perror("select");
+                close(streamer->tv_fd);
+                streamer->tv_fd = -1;
+                return -1;
+            }
+        } else {
+            fprintf(stderr, "Connection failed: ");
+            perror("connect");
+            fprintf(stderr, "Debug: Error code: %d\n", errno);
+            print_connection_debug("", addr_str, streamer->tv_port);
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
+        }
+    }
+
+    // Restore blocking mode
+    if (fcntl(streamer->tv_fd, F_SETFL, flags) < 0) {
+        perror("fcntl(F_SETFL restore)");
         close(streamer->tv_fd);
         streamer->tv_fd = -1;
         return -1;
