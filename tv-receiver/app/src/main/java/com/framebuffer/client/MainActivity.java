@@ -286,11 +286,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
                         // Query display capabilities - use TV if connected, otherwise phone display
                         android.view.Display targetDisplay = getTargetDisplay();
-                        android.graphics.Point size = new android.graphics.Point();
-                        // Use getMode() for physical dimensions (modern API, available from API 23+)
-                        android.view.Display.Mode mode = targetDisplay.getMode();
-                        size.x = mode.getPhysicalWidth();
-                        size.y = mode.getPhysicalHeight();
+                        android.graphics.Point size = getDisplayPhysicalSize(targetDisplay);
 
                         // Get refresh rate from target display
                         float refreshRate = targetDisplay.getRefreshRate();
@@ -345,7 +341,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             // Get display name from the target display
                             displayName = targetDisplay.getName();
                             if (displayName == null || displayName.isEmpty()) {
-                                if (isTvConnected()) {
+                                // Check if target display is different from default (i.e., TV connected)
+                                android.view.Display defaultDisplay = getDefaultDisplay();
+                                if (defaultDisplay != null && targetDisplay.getDisplayId() != defaultDisplay.getDisplayId()) {
                                     displayName = "TV Display";
                                 } else {
                                     displayName = "Phone Display";
@@ -954,114 +952,98 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         }
     }
 
-    private boolean isTvConnected() {
-        if (displayManager == null) {
-            return false;
+    /**
+     * Get the default display with fallback logic.
+     * Tries DisplayManager first, then Context.getDisplay(), then deprecated API as last resort.
+     */
+    private android.view.Display getDefaultDisplay() {
+        if (displayManager != null) {
+            android.view.Display display = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+            if (display != null) {
+                return display;
+            }
         }
-        android.view.Display defaultDisplay = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+        // Fallback if DisplayManager fails - use Context.getDisplay() (API 30+)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.view.Display display = getDisplay();
+            if (display != null) {
+                return display;
+            }
+        }
+        // Last resort: use deprecated API (should not happen in practice)
+        @SuppressWarnings("deprecation")
+        android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
+        return fallbackDisplay;
+    }
+
+    /**
+     * Get the physical size of a display as a Point.
+     * Uses Display.getMode() for physical dimensions (modern API, available from API 23+).
+     */
+    private android.graphics.Point getDisplayPhysicalSize(android.view.Display display) {
+        android.graphics.Point size = new android.graphics.Point();
+        android.view.Display.Mode mode = display.getMode();
+        size.x = mode.getPhysicalWidth();
+        size.y = mode.getPhysicalHeight();
+        return size;
+    }
+
+    /**
+     * Find an external/TV display if one exists.
+     * Returns null if no external display is found.
+     */
+    private android.view.Display findExternalDisplay() {
+        if (displayManager == null) {
+            return null;
+        }
+        android.view.Display defaultDisplay = getDefaultDisplay();
         if (defaultDisplay == null) {
-            return false;
+            return null;
         }
         int defaultDisplayId = defaultDisplay.getDisplayId();
-
         android.view.Display[] displays = displayManager.getDisplays();
+        android.graphics.Point defaultSize = getDisplayPhysicalSize(defaultDisplay);
 
         // Check if there are any displays other than the default (phone) display
         for (android.view.Display display : displays) {
             if (display.getDisplayId() != defaultDisplayId) {
                 // Check if it's a presentation/external display
                 if ((display.getFlags() & android.view.Display.FLAG_PRESENTATION) != 0) {
-                    return true;
+                    return display;
                 }
                 // Also check if it's HDMI or other external connection
                 // (HDMI displays typically have different characteristics)
-                android.graphics.Point size = new android.graphics.Point();
-                // Use getMode() for physical dimensions (modern API, available from API 23+)
-                android.view.Display.Mode mode = display.getMode();
-                size.x = mode.getPhysicalWidth();
-                size.y = mode.getPhysicalHeight();
-                // If it's a different size or has presentation flag, it's likely external
-                android.graphics.Point defaultSize = new android.graphics.Point();
-                android.view.Display.Mode defaultMode = defaultDisplay.getMode();
-                defaultSize.x = defaultMode.getPhysicalWidth();
-                defaultSize.y = defaultMode.getPhysicalHeight();
+                android.graphics.Point size = getDisplayPhysicalSize(display);
                 if (!size.equals(defaultSize)) {
-                    return true;
+                    return display;
                 }
             }
         }
-        return false;
+        return null;
     }
 
+    /**
+     * Check if a TV/external display is connected.
+     */
+    private boolean isTvConnected() {
+        return findExternalDisplay() != null;
+    }
+
+    /**
+     * Get the target display for rendering - TV if connected, otherwise phone display.
+     */
     private android.view.Display getTargetDisplay() {
-        if (displayManager == null) {
-            // Fallback if displayManager is not available - use Context.getDisplay() (API 30+)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                android.view.Display display = getDisplay();
-                if (display != null) {
-                    return display;
-                }
-            }
-            // Last resort: use deprecated API (should not happen in practice)
-            @SuppressWarnings("deprecation")
-            android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
-            return fallbackDisplay;
-        }
-
-        android.view.Display defaultDisplay = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY);
-        if (defaultDisplay == null) {
-            return null;
-        }
-        int defaultDisplayId = defaultDisplay.getDisplayId();
-
-        android.view.Display[] displays = displayManager.getDisplays();
-
-        // First, try to find an external/TV display
-        for (android.view.Display display : displays) {
-            if (display.getDisplayId() != defaultDisplayId) {
-                // Check if it's a presentation/external display
-                if ((display.getFlags() & android.view.Display.FLAG_PRESENTATION) != 0) {
-                    return display;
-                }
-                // Also check if it's HDMI or other external connection
-                android.graphics.Point size = new android.graphics.Point();
-                // Use getMode() for physical dimensions (modern API, available from API 23+)
-                android.view.Display.Mode mode = display.getMode();
-                size.x = mode.getPhysicalWidth();
-                size.y = mode.getPhysicalHeight();
-                android.graphics.Point defaultSize = new android.graphics.Point();
-                android.view.Display.Mode defaultMode = defaultDisplay.getMode();
-                defaultSize.x = defaultMode.getPhysicalWidth();
-                defaultSize.y = defaultMode.getPhysicalHeight();
-                if (!size.equals(defaultSize)) {
-                    return display;
-                }
-            }
-        }
-
-        // If no external display, use the default (phone) display
-        return defaultDisplay;
+        android.view.Display externalDisplay = findExternalDisplay();
+        return externalDisplay != null ? externalDisplay : getDefaultDisplay();
     }
 
     private void updateDisplayVisibility() {
-        boolean tvConnected = isTvConnected();
         android.view.Display tvDisplay = getTargetDisplay();
-
-        android.view.Display defaultDisplay = displayManager != null ?
-            displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY) : null;
-        if (defaultDisplay == null) {
-            // Fallback if DisplayManager fails - use Context.getDisplay() (API 30+)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                defaultDisplay = getDisplay();
-            }
-            if (defaultDisplay == null) {
-                // Last resort: use deprecated API (should not happen in practice)
-                @SuppressWarnings("deprecation")
-                android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
-                defaultDisplay = fallbackDisplay;
-            }
-        }
-        if (tvConnected && tvDisplay != null && defaultDisplay != null && tvDisplay.getDisplayId() != defaultDisplay.getDisplayId()) {
+        android.view.Display defaultDisplay = getDefaultDisplay();
+        // Check if TV display is connected (different from default)
+        boolean tvConnected = tvDisplay != null && defaultDisplay != null &&
+                              tvDisplay.getDisplayId() != defaultDisplay.getDisplayId();
+        if (tvConnected) {
             // TV is connected - create Presentation on TV display
             if (tvPresentation == null) {
                 tvPresentation = new TvPresentation(this, tvDisplay);
