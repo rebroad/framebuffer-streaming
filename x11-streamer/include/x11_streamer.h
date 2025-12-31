@@ -15,6 +15,9 @@ typedef struct {
     int port;                // Port number (default: DEFAULT_TV_PORT)
     int broadcast_timeout_ms; // Timeout for broadcast discovery in milliseconds (default: 5000)
     const char *program_name; // Program name (for error messages, extracted from argv[0])
+    bool force_encrypt;      // Add for handshake flag
+    bool force_no_encrypt;   // Add for handshake flag
+    uint16_t pin;            // PIN from command line (0xFFFF if not provided, valid PINs are 0-9999)
 } streamer_discovery_options_t;
 
 // Create X11 streamer that connects to TV receiver
@@ -26,4 +29,3 @@ int x11_streamer_run(x11_streamer_t *streamer);
 void x11_streamer_stop(x11_streamer_t *streamer);
 
 #endif // X11_STREAMER_H
-

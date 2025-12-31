@@ -27,6 +27,9 @@ static void print_usage(const char *prog_name)
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --port PORT          Port number for broadcast discovery (default: %d)\n", DEFAULT_TV_PORT);
     fprintf(stderr, "  --broadcast-timeout MS  Broadcast discovery timeout in milliseconds (default: 5000)\n");
+    fprintf(stderr, "  --crypt              Force encryption for session (overrides autodetect)\n");
+    fprintf(stderr, "  --nocrypt            Disable encryption for session (overrides autodetect)\n");
+    fprintf(stderr, "  --pin PIN            PIN code (4 digits, avoids prompt)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Examples:\n");
     fprintf(stderr, "  %s                           # Broadcast discovery on port %d\n", prog_name, DEFAULT_TV_PORT);
@@ -42,9 +45,11 @@ int main(int argc, char *argv[])
         .host = NULL,
         .port = DEFAULT_TV_PORT,
         .broadcast_timeout_ms = 5000,
-        .program_name = argv[0]  // Pass program name for error messages
+        .program_name = argv[0],  // Pass program name for error messages
+        .force_encrypt = false,
+        .force_no_encrypt = false,
+        .pin = 0xFFFF  // No PIN provided by default (0xFFFF = sentinel, valid PINs are 0-9999)
     };
-
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0) {
@@ -72,6 +77,22 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
+        } else if (strcmp(argv[i], "--crypt") == 0) {
+            options.force_encrypt = true;
+        } else if (strcmp(argv[i], "--nocrypt") == 0) {
+            options.force_no_encrypt = true;
+        } else if (strcmp(argv[i], "--pin") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: --pin requires an argument\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+            int pin_val = atoi(argv[++i]);
+            if (pin_val < 0 || pin_val > 9999) {
+                fprintf(stderr, "Error: Invalid PIN (must be 0000-9999)\n");
+                return 1;
+            }
+            options.pin = (uint16_t)pin_val;
         } else if (argv[i][0] != '-') {
             // Positional argument: HOST:PORT or HOST
             char *host_port = argv[i];

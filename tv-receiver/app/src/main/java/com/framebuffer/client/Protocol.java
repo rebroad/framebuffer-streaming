@@ -7,7 +7,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 public class Protocol {
-    public static final byte MSG_HELLO = 0x01;
+    public static final byte MSG_CLIENT_HELLO = 0x00;  // Streamer's initial hello
+    public static final byte MSG_HELLO = 0x01;  // Receiver's capabilities hello
     public static final byte MSG_FRAME = 0x02;
     public static final byte MSG_AUDIO = 0x03;
     public static final byte MSG_CONFIG = 0x05;

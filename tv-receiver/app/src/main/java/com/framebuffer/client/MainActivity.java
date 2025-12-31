@@ -11,6 +11,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkRequest;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.Socket;
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
@@ -204,27 +205,38 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         android.util.Log.i("MainActivity", "Connection accepted from " + acceptedSocket.getRemoteSocketAddress());
                         clientSocket = acceptedSocket;
 
-                        // Determine if PIN verification is required based on network interface
+                        // --- BEGIN PROTOCOL  ---
+                        // Wait for initial CLIENT_HELLO (and parse encryption request and optional plaintext PIN)
+                        InputStream in = acceptedSocket.getInputStream();
+                        Protocol.MessageHeader helloHeader = Protocol.receiveHeader(in);
+                        if (helloHeader.type != Protocol.MSG_CLIENT_HELLO) {
+                            android.util.Log.e("MainActivity", "Expected CLIENT_HELLO as first message from streamer!");
+                            acceptedSocket.close();
+                            continue;
+                        }
+                        byte[] helloPayload = new byte[helloHeader.length];
+                        int totalRead = 0;
+                        while (totalRead < helloHeader.length) {
+                            int r = in.read(helloPayload, totalRead, helloHeader.length - totalRead);
+                            if (r < 0) throw new IOException("Connection closed during HELLO");
+                            totalRead += r;
+                        }
+                        // Parse version/flags/PIN
+                        int version = helloPayload[0] & 0xFF;
+                        int flags = helloPayload[1] & 0xFF;
+                        boolean streamerWantsEncryption = (flags & 0x01) != 0;
+                        boolean requiresPin = shouldRequirePin(acceptedSocket);
+                        int plaintextPin = -1;
+                        if (!streamerWantsEncryption && requiresPin && helloPayload.length >= 4) {
+                            plaintextPin = ((helloPayload[2] & 0xFF) << 8) | (helloPayload[3] & 0xFF);
+                        }
                         android.util.Log.i("MainActivity", "=== CONNECTION HANDLING ===");
                         android.util.Log.i("MainActivity", "Local address: " + acceptedSocket.getLocalAddress());
-                        boolean requiresPin = shouldRequirePin(acceptedSocket);
-                        android.util.Log.i("MainActivity", "Connection from interface requiring PIN: " + requiresPin);
+                        android.util.Log.i("MainActivity", "requiresPin: " + requiresPin + ", streamerWantsEncryption: " + streamerWantsEncryption);
 
-                        // Send capabilities message IMMEDIATELY to tell streamer if encryption is needed
-                        // This must be sent before streamer tries to do Noise handshake
-                        java.io.OutputStream out = acceptedSocket.getOutputStream();
-                        byte[] capabilitiesPayload = new byte[4];
-                        capabilitiesPayload[0] = (byte)(requiresPin ? 1 : 0);  // requires_encryption
-                        capabilitiesPayload[1] = 0;  // reserved
-                        capabilitiesPayload[2] = 0;  // reserved
-                        capabilitiesPayload[3] = 0;  // reserved
-                        Protocol.sendMessage(out, Protocol.MSG_CAPABILITIES, capabilitiesPayload);
-                        android.util.Log.i("MainActivity", "Sent CAPABILITIES message: requires_encryption=" + requiresPin);
-
-                        // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
-                        // Only if PIN is required (encryption enabled)
+                        // If encrypted, perform Noise Protocol handshake (now follows protocol flag, not interface type):
                         NoiseEncryption noiseEncryption = null;
-                        if (requiresPin) {
+                        if (streamerWantsEncryption) {
                             android.util.Log.i("MainActivity", "Starting Noise Protocol handshake (PIN required)");
                             noiseEncryption = new NoiseEncryption(false);  // Receiver is responder
                             currentNoiseEncryption = noiseEncryption;  // Store for use in verifyPinFromClient
@@ -254,18 +266,34 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             }
 
                             // Now verify PIN over encrypted channel
-                            android.util.Log.i("MainActivity", "Waiting for PIN verification from client...");
-                            if (!verifyPinFromClient(acceptedSocket, noiseEncryption)) {
-                                android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
-                                noiseEncryption.cleanup();
-                                currentNoiseEncryption = null;
-                                acceptedSocket.close();
-                                continue; // Continue listening for next connection
+                            boolean pinValid = true;
+                            if (requiresPin) {
+                                if (!verifyPinFromClient(acceptedSocket, noiseEncryption)) {
+                                    android.util.Log.w("MainActivity", "PIN verification failed, closing connection");
+                                    noiseEncryption.cleanup();
+                                    currentNoiseEncryption = null;
+                                    acceptedSocket.close();
+                                    continue; // Continue listening for next connection
+                                }
+                                android.util.Log.i("MainActivity", "PIN verification successful");
                             }
-                            android.util.Log.i("MainActivity", "PIN verification successful");
+                            // proceed
                         } else {
-                            android.util.Log.i("MainActivity", "Skipping Noise handshake and PIN verification (trusted interface: USB tethering)");
-                            currentNoiseEncryption = null;  // No encryption for USB tethering
+                            // Not encrypted. If PIN required, validate immediately from helloPayload.
+                            if (requiresPin) {
+                                if (plaintextPin < 0) {
+                                    android.util.Log.e("MainActivity", "PIN required but not provided in HELLO, closing connection.");
+                                    acceptedSocket.close();
+                                    continue; // PIN missing
+                                }
+                                if (plaintextPin != pinCode) {
+                                    android.util.Log.w("MainActivity", "Incorrect PIN in plaintext HELLO, closing connection.");
+                                    acceptedSocket.close();
+                                    continue; // Invalid PIN
+                                }
+                                android.util.Log.i("MainActivity", "PIN successfully checked over plaintext connection.");
+                            }
+                            currentNoiseEncryption = null;  // No encryption for plaintext
                         }
 
                         new Handler(Looper.getMainLooper()).post(() -> {
@@ -703,7 +731,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 }
             }
 
-            int receivedPin = (pinData[0] & 0xFF) | ((pinData[1] & 0xFF) << 8);
+            int receivedPin = ((pinData[0] & 0xFF) << 8) | (pinData[1] & 0xFF);
 
             // Verify PIN
             if (receivedPin == pinCode) {
@@ -739,7 +767,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     // List of trusted interface names (no PIN required)
     private static final java.util.Set<String> TRUSTED_INTERFACES = new java.util.HashSet<String>() {{
         add("rndis0");
-        add("tun0");
     }};
 
     /**

@@ -39,6 +39,9 @@ typedef struct tv_connection {
 } tv_connection_t;
 
 struct x11_streamer {
+    bool force_encrypt;
+    bool force_no_encrypt;
+    uint16_t pin;  // PIN from command line (0 if not provided)
     int tv_fd;  // Connection to TV receiver
     char *tv_host;
     int tv_port;
@@ -80,6 +83,27 @@ static inline int streamer_receive_message(x11_streamer_t *streamer, message_hea
     } else {
         return protocol_receive_message(streamer->tv_fd, header, payload);
     }
+}
+
+// Helper function to get PIN (from CLI or prompt)
+static uint16_t get_pin(x11_streamer_t *streamer)
+{
+    if (streamer->pin != 0xFFFF) {
+        return streamer->pin;  // Use PIN from command line
+    }
+
+    // Prompt for PIN
+    printf("Enter PIN (4 digits, displayed on TV receiver): ");
+    fflush(stdout);
+    char pin_str[32];
+    if (!fgets(pin_str, sizeof(pin_str), stdin)) {
+        return 0xFFFF;  // Error - caller should check
+    }
+    uint16_t pin = (uint16_t)atoi(pin_str);
+    if (pin > 9999) {
+        return 0xFFFF;  // Invalid PIN
+    }
+    return pin;
 }
 
 // Helper function to send raw data (encrypted if available)
@@ -828,6 +852,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
         opts.host = NULL;
         opts.port = DEFAULT_TV_PORT;
         opts.broadcast_timeout_ms = 5000;
+        opts.pin = 0xFFFF;  // No PIN provided
     }
 
     // If host is specified, disable broadcast
@@ -840,6 +865,9 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     }
     streamer->tv_port = opts.port;
     streamer->broadcast_timeout_ms = opts.broadcast_timeout_ms;
+    streamer->force_encrypt = opts.force_encrypt;
+    streamer->force_no_encrypt = opts.force_no_encrypt;
+    streamer->pin = opts.pin;
     // Store program name (extract basename if provided)
     if (opts.program_name) {
         const char *basename = strrchr(opts.program_name, '/');
@@ -847,7 +875,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     } else {
         streamer->program_name = strdup("x11-streamer");  // Default fallback
     }
-    streamer->enable_encryption = true;  // Default: enabled, will be adjusted based on CAPABILITIES message
+    streamer->enable_encryption = true;  // Default: enabled, will be determined during handshake
     streamer->tv_fd = -1;
     streamer->x11_ctx = x11_context_create();
     if (!streamer->x11_ctx) {
@@ -1551,57 +1579,67 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
     printf("Connected to TV receiver\n");
 
-    // Receive CAPABILITIES message from TV receiver to know if encryption is needed
-    printf("Debug: Waiting for CAPABILITIES message from TV receiver...\n");
-    message_header_t header;
-    void *payload = NULL;
-    struct pollfd pfd = {.fd = streamer->tv_fd, .events = POLLIN};
-    int poll_ret = poll(&pfd, 1, 2000);  // 2 second timeout
-    if (poll_ret <= 0) {
-        if (poll_ret == 0) {
-            fprintf(stderr, "Timeout waiting for CAPABILITIES message\n");
-        } else {
-            perror("poll");
+    // Determine encryption policy: CLI override > interface detection
+    bool wants_encryption = true;  // Default: encrypt
+    bool needs_pin = true;  // Default: PIN required (unless rndis0)
+
+    // Check if connecting via USB tethering (rndis0 interface)
+    char usb_ip[INET_ADDRSTRLEN] = {0};
+    bool is_usb_tethering = get_usb_tethering_ip_via_adb(usb_ip, sizeof(usb_ip)) &&
+                            strcmp(addr_str, usb_ip) == 0;
+
+    if (streamer->force_encrypt) {
+        wants_encryption = true;
+        printf("Encryption forced via --crypt\n");
+    } else if (streamer->force_no_encrypt) {
+        wants_encryption = false;
+        printf("Encryption disabled via --nocrypt\n");
+    } else if (is_usb_tethering) {
+        wants_encryption = false;
+        needs_pin = false;
+        printf("USB tethering detected (rndis0) - using plaintext, no PIN\n");
+    } else {
+        wants_encryption = true;
+        needs_pin = true;
+        printf("WiFi/other interface - using encryption with PIN\n");
+    }
+
+    streamer->enable_encryption = wants_encryption;
+
+    // Send CLIENT_HELLO as first message
+    uint8_t client_hello_payload[4];  // version(1) + flags(1) + optional PIN(2)
+    client_hello_payload[0] = 1;  // protocol version
+    client_hello_payload[1] = wants_encryption ? 0x01 : 0x00;  // encryption flag
+
+    size_t hello_payload_size = 2;  // version + flags
+
+    uint16_t pin = 0xFFFF;
+    if (!wants_encryption && needs_pin) {
+        // PIN required in plaintext HELLO
+        pin = get_pin(streamer);
+        if (pin == 0xFFFF) {
+            fprintf(stderr, "No PIN entered or invalid PIN.\n");
+            close(streamer->tv_fd);
+            streamer->tv_fd = -1;
+            return -1;
         }
+        uint16_t pin_be = htons(pin);
+        client_hello_payload[2] = (pin_be >> 8) & 0xFF;  // High byte first
+        client_hello_payload[3] = pin_be & 0xFF;         // Low byte second
+        hello_payload_size = 4;
+    }
+
+    if (protocol_send_message(streamer->tv_fd, MSG_CLIENT_HELLO, client_hello_payload, hello_payload_size) < 0) {
+        fprintf(stderr, "Failed to send CLIENT_HELLO\n");
         close(streamer->tv_fd);
         streamer->tv_fd = -1;
         return -1;
     }
+    printf("Sent CLIENT_HELLO (encryption=%s)\n", wants_encryption ? "yes" : "no");
 
-    int ret = protocol_receive_message(streamer->tv_fd, &header, &payload);
-    if (ret <= 0 || header.type != MSG_CAPABILITIES) {
-        fprintf(stderr, "Expected CAPABILITIES message, got type 0x%02x\n", header.type);
-        if (payload) free(payload);
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
-
-    if (!payload || header.length < sizeof(capabilities_message_t)) {
-        fprintf(stderr, "Invalid CAPABILITIES message format\n");
-        if (payload) free(payload);
-        close(streamer->tv_fd);
-        streamer->tv_fd = -1;
-        return -1;
-    }
-
-    capabilities_message_t *cap = (capabilities_message_t *)payload;
-    bool receiver_requires_encryption = (cap->requires_encryption != 0);
-    printf("Debug: TV receiver capabilities: requires_encryption=%d\n", receiver_requires_encryption);
-    free(payload);
-    payload = NULL;
-
-    // Override streamer's encryption setting based on receiver's capabilities
-    // If receiver says encryption not needed (USB tethering), disable it
-    if (!receiver_requires_encryption) {
-        printf("Debug: TV receiver indicates encryption not needed (USB tethering) - disabling encryption\n");
-        streamer->enable_encryption = false;
-    }
-
-    // Perform Noise Protocol handshake FIRST (before any sensitive data exchange)
-    // Only if receiver requires encryption
-    if (receiver_requires_encryption) {
-        printf("Debug: Encryption enabled - starting Noise Protocol handshake\n");
+    // Perform Noise Protocol handshake if encryption requested
+    if (wants_encryption) {
+        printf("Starting Noise Protocol handshake...\n");
         streamer->noise_ctx = noise_encryption_init(true);  // Streamer is initiator
         if (!streamer->noise_ctx) {
             fprintf(stderr, "Failed to initialize Noise Protocol encryption\n");
@@ -1609,7 +1647,6 @@ int x11_streamer_run(x11_streamer_t *streamer)
             streamer->tv_fd = -1;
             return -1;
         }
-        printf("Debug: Noise context initialized, calling handshake...\n");
 
         if (noise_encryption_handshake(streamer->noise_ctx, streamer->tv_fd) < 0) {
             fprintf(stderr, "Noise Protocol handshake failed\n");
@@ -1631,54 +1668,52 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
         printf("Noise Protocol encryption established\n");
 
-        // Now verify PIN over encrypted channel
-        printf("Enter PIN (4 digits, displayed on TV receiver): ");
-        fflush(stdout);
-        char pin_str[32];
-        if (!fgets(pin_str, sizeof(pin_str), stdin)) {
-            fprintf(stderr, "No PIN entered.\n");
-            noise_encryption_cleanup(streamer->noise_ctx);
-            streamer->noise_ctx = NULL;
-            close(streamer->tv_fd);
-            streamer->tv_fd = -1;
-            return -1;
-        }
-        uint16_t pin = (uint16_t)atoi(pin_str);
+        // Send PIN verification over encrypted channel if needed
+        if (needs_pin) {
+            pin = get_pin(streamer);
+            if (pin == 0xFFFF) {
+                fprintf(stderr, "No PIN entered or invalid PIN.\n");
+                noise_encryption_cleanup(streamer->noise_ctx);
+                streamer->noise_ctx = NULL;
+                close(streamer->tv_fd);
+                streamer->tv_fd = -1;
+                return -1;
+            }
 
-        // Send PIN verification over encrypted channel
-        pin_verify_t pin_msg = {.pin = htons(pin)};  // Convert to network byte order
-        if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
-            fprintf(stderr, "Failed to send PIN verification\n");
-            noise_encryption_cleanup(streamer->noise_ctx);
-            streamer->noise_ctx = NULL;
-            close(streamer->tv_fd);
-            streamer->tv_fd = -1;
-            return -1;
-        }
+            // Send PIN verification over encrypted channel
+            pin_verify_t pin_msg = {.pin = htons(pin)};  // Convert to network byte order
+            if (streamer_send_message(streamer, MSG_PIN_VERIFY, &pin_msg, sizeof(pin_msg)) < 0) {
+                fprintf(stderr, "Failed to send PIN verification\n");
+                noise_encryption_cleanup(streamer->noise_ctx);
+                streamer->noise_ctx = NULL;
+                close(streamer->tv_fd);
+                streamer->tv_fd = -1;
+                return -1;
+            }
 
-        // Wait for PIN verified response over encrypted channel
-        message_header_t header;
-        void *payload = NULL;
-        if (streamer_receive_message(streamer, &header, &payload) <= 0 ||
-            header.type != MSG_PIN_VERIFIED) {
-            fprintf(stderr, "PIN verification failed\n");
+            // Wait for PIN verified response over encrypted channel
+            message_header_t header;
+            void *payload = NULL;
+            if (streamer_receive_message(streamer, &header, &payload) <= 0 ||
+                header.type != MSG_PIN_VERIFIED) {
+                fprintf(stderr, "PIN verification failed\n");
+                if (payload) free(payload);
+                noise_encryption_cleanup(streamer->noise_ctx);
+                streamer->noise_ctx = NULL;
+                close(streamer->tv_fd);
+                streamer->tv_fd = -1;
+                return -1;
+            }
             if (payload) free(payload);
-            noise_encryption_cleanup(streamer->noise_ctx);
-            streamer->noise_ctx = NULL;
-            close(streamer->tv_fd);
-            streamer->tv_fd = -1;
-            return -1;
+            printf("PIN verified successfully\n");
         }
-        if (payload) free(payload);
-        printf("PIN verified successfully\n");
     } else {
         streamer->noise_ctx = NULL;
-        printf("Encryption not required by TV receiver (USB tethering) - using unencrypted connection\n");
-        printf("DMA-BUF zero-copy enabled for better performance\n");
+        printf("Using unencrypted connection\n");
     }
 
-    // Receive HELLO message before starting the thread (TV receiver sends it immediately after CAPABILITIES)
-    printf("Debug: Waiting for HELLO message from TV receiver...\n");
+    // Receive HELLO message from receiver (display capabilities)
+    printf("Waiting for HELLO message from TV receiver...\n");
     message_header_t hello_header;
     void *hello_payload = NULL;
     int hello_ret = protocol_receive_message(streamer->tv_fd, &hello_header, &hello_payload);

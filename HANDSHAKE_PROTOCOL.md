@@ -38,7 +38,42 @@ Streamer                    Receiver
 
 The streamer establishes a TCP connection to the receiver on port 4321 (default).
 
-### Phase 2: Capabilities Exchange
+### Phase 2: Streamer Hello (Encryption and PIN Negotiation)
+
+The streamer (client) always initiates the handshake immediately after TCP connection with a HELLO message. The receiver must not send any data until it receives this message.
+
+#### Step 1: Streamer sends HELLO
+
+**Streamer → Receiver: MSG_HELLO (0x01)**
+
+| Field                | Size   | Description                                               |
+|----------------------|--------|-----------------------------------------------------------|
+| Version              | 1 byte | Protocol version                                          |
+| Flags                | 1 byte | Bit 0: encryption_requested (1=use, 0=plaintext)          |
+| [PIN]                | 2 bytes| PIN (if needed, only if encryption_requested=0 and receiver requires a PIN for this interface) |
+
+- If encryption_requested=1, the PIN is **omitted** from this message and will be provided later over the encrypted channel.
+- If encryption_requested=0 and the receiver requires a PIN (not rndis0), the PIN is included **in plaintext** here.
+- If encryption_requested=0 and receiver does not require a PIN (rndis0), this field is omitted.
+
+**Example (plaintext, PIN required)**
+```
+01 01 12 34      // Version=1, Flags=0, PIN=0x1234 (4660 - big-endian)
+```
+
+**Example (encrypted, PIN omitted)**
+```
+01 01            // Version=1, Flags=1 (encryption requested)
+```
+
+#### Step 2: If Encryption Requested
+- Both peers perform Noise handshake.
+- Once secure, streamer immediately sends PIN_VERIFY if required (encrypted).
+
+#### Step 3: If No Encryption
+- If the receiver requires PIN, it checks for the PIN in the original plaintext handshake message.
+- If not required, handshake proceeds.
+
 
 #### Step 1: Receiver sends CAPABILITIES
 
@@ -152,13 +187,13 @@ Header (9 bytes) - encrypted:
 Payload (2 bytes) - encrypted:
 +--------+--------+
 |  PIN   |  PIN   |
-| (low)  | (high) |
+| (high) | (low)  |
 +--------+--------+
-  uint16 (little-endian)
+  uint16 (big-endian, network byte order)
 ```
 
 - PIN is a 4-digit number (0000-9999) entered by the user
-- Example: PIN 1234 = `0xD2 0x04` (little-endian)
+- Example: PIN 1234 = `0x04 0xD2` (big-endian: 0x04D2 = 1234 decimal)
 
 **Encrypted Message Format:**
 
@@ -168,7 +203,7 @@ The encrypted message is wrapped with Noise Protocol encryption:
 +--------+--------+--------+--------+--------+--------+...
 | Length | Length |  Encrypted Header (9 bytes) + Payload (2 bytes) + MAC (16 bytes)
 +--------+--------+--------+--------+--------+--------+...
-  uint16  (high)   Noise-encrypted data
+  (high)   (low)    Noise-encrypted data
   (big-endian)
 ```
 

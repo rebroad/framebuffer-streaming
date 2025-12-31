@@ -7,19 +7,20 @@
 
 // Message types
 typedef enum {
+    MSG_CLIENT_HELLO = 0x00, // New: Streamer Hello
     MSG_HELLO = 0x01,
     MSG_FRAME = 0x02,
     MSG_AUDIO = 0x03,
     MSG_CONFIG = 0x05,
     MSG_PING = 0x06,
     MSG_PONG = 0x07,
-    MSG_PAUSE = 0x08,        // Pause frame sending (receiver has no surface)
-    MSG_RESUME = 0x09,      // Resume frame sending (receiver has surface again)
-    MSG_DISCOVERY_REQUEST = 0x10,  // UDP broadcast discovery request
-    MSG_DISCOVERY_RESPONSE = 0x11, // UDP broadcast discovery response
-    MSG_PIN_VERIFY = 0x12,         // PIN verification request
-    MSG_PIN_VERIFIED = 0x13,       // PIN verification success
-    MSG_CAPABILITIES = 0x14,       // Capabilities message (sent immediately after connection)
+    MSG_PAUSE = 0x08,
+    MSG_RESUME = 0x09,
+    MSG_DISCOVERY_REQUEST = 0x10,
+    MSG_DISCOVERY_RESPONSE = 0x11,
+    MSG_PIN_VERIFY = 0x12,
+    MSG_PIN_VERIFIED = 0x13,
+    MSG_CAPABILITIES = 0x14,
     MSG_ERROR = 0xFF
 } message_type_t;
 
@@ -30,6 +31,13 @@ typedef struct __attribute__((packed)) {
     uint32_t sequence;
 } message_header_t;
 
+// Client HELLO message as sent by the streamer (NEW)
+typedef struct __attribute__((packed)) {
+    uint8_t protocol_version; // 1
+    uint8_t flags; // Bit 0: encryption requested
+    // Optional: If encryption_requested==0 and PIN required: uint16_t pin (little-endian)
+} client_hello_t;
+
 // Display mode capability
 typedef struct __attribute__((packed)) {
     uint32_t width;
@@ -37,7 +45,7 @@ typedef struct __attribute__((packed)) {
     uint32_t refresh_rate;  // Hz * 100 (e.g., 6000 = 60.00 Hz)
 } display_mode_t;
 
-// HELLO message
+// Receiver HELLO message (unchanged)
 typedef struct __attribute__((packed)) {
     uint16_t protocol_version;
     uint16_t num_modes;    // Number of supported display modes
@@ -128,4 +136,3 @@ int protocol_send_message_encrypted(void *noise_ctx, int fd, message_type_t type
 int protocol_receive_message_encrypted(void *noise_ctx, int fd, message_header_t *header, void **payload);
 
 #endif // PROTOCOL_H
-
