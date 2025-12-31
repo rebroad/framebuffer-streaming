@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Framebuffer Client</string>
+    <string name="app_name">X11 receiver</string>
     <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>
     <string name="server_address">Server Address</string>

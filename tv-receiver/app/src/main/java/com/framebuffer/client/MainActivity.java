@@ -728,6 +728,22 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
      * Only USB tethering (rndis0) is trusted and doesn't require PIN.
      * All other interfaces (wlan0, swlan0, etc.) require PIN verification for security.
      */
+    // List of trusted interface names (no PIN required)
+    private static final java.util.Set<String> TRUSTED_INTERFACES = new java.util.HashSet<String>() {{
+        add("rndis0");
+        add("tun0");
+    }};
+
+    /**
+     * Returns true if this interface should never require a PIN (trusted for local, tethered, or VPN).
+     */
+    private boolean isTrustedInterface(String ifaceName) {
+        return TRUSTED_INTERFACES.contains(ifaceName);
+    }
+
+    /**
+     * Determine if PIN verification is required based on the network interface name (uses isTrustedInterface).
+     */
     private boolean shouldRequirePin(Socket socket) {
         try {
             java.net.InetAddress localAddr = socket.getLocalAddress();
@@ -735,10 +751,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // Can't determine interface, require PIN for security
                 return true;
             }
-
-            // Get all network interfaces and find which one this address belongs to
-            java.util.Enumeration<java.net.NetworkInterface> interfaces =
-                java.net.NetworkInterface.getNetworkInterfaces();
+            java.util.Enumeration<java.net.NetworkInterface> interfaces = java.net.NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 java.net.NetworkInterface iface = interfaces.nextElement();
                 java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
@@ -747,14 +760,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     if (addr.equals(localAddr)) {
                         String ifaceName = iface.getName();
                         android.util.Log.i("MainActivity", "Connection from interface: " + ifaceName);
-
-                        // USB tethering interface (rndis0) - trusted, no PIN required
-                        if (ifaceName.equals("rndis0")) {
-                            android.util.Log.i("MainActivity", "USB tethering detected - PIN not required");
+                        if (isTrustedInterface(ifaceName)) {
+                            android.util.Log.i("MainActivity", ifaceName+" is a trusted interface - PIN not required");
                             return false;
                         }
-
-                        // All other interfaces (wlan0, swlan0, etc.) require PIN
                         android.util.Log.i("MainActivity", "Interface " + ifaceName + " requires PIN authentication");
                         return true;
                     }
@@ -763,7 +772,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         } catch (Exception e) {
             android.util.Log.e("MainActivity", "Error determining network interface", e);
         }
-
         // Default to requiring PIN for security if we can't determine the interface
         return true;
     }
@@ -893,25 +901,85 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 canvas.drawColor(android.graphics.Color.BLACK);
 
                 android.graphics.Paint paint = new android.graphics.Paint();
-                paint.setColor(android.graphics.Color.WHITE);
-                paint.setTextSize(60);
                 paint.setAntiAlias(true);
                 paint.setTextAlign(android.graphics.Paint.Align.CENTER);
 
                 int centerX = canvas.getWidth() / 2;
                 int y = canvas.getHeight() / 2 - 150;
 
+                // Get version string
+                String version = getString(getResources().getIdentifier("app_version", "string", getPackageName()));
+                // Get display resolution string (non-deprecated way)
+                String resolution;
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    android.view.WindowMetrics winMetrics = getWindowManager().getCurrentWindowMetrics();
+                    int width = winMetrics.getBounds().width();
+                    int height = winMetrics.getBounds().height();
+                    resolution = width + "x" + height;
+                } else {
+                    android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+                    ((tvSurfaceView != null) ? tvSurfaceView.getDisplay() : surfaceView.getDisplay()).getMetrics(metrics);
+                    resolution = metrics.widthPixels + "x" + metrics.heightPixels;
+                }
+
+                // Draw version in cyan at top-left
+                paint.setColor(android.graphics.Color.CYAN);
+                paint.setTextSize(40);
+                paint.setTextAlign(android.graphics.Paint.Align.LEFT);
+                canvas.drawText(version, 30, 50, paint);
+
+                // Draw resolution in cyan at top-right
+                paint.setTextAlign(android.graphics.Paint.Align.RIGHT);
+                canvas.drawText(resolution, canvas.getWidth() - 30, 50, paint);
+
+                // Draw center info
+                paint.setColor(android.graphics.Color.WHITE);
+                paint.setTextSize(60);
+                paint.setTextAlign(android.graphics.Paint.Align.CENTER);
+                paint.setFakeBoldText(false);
                 canvas.drawText("Waiting for X11 streamer...", centerX, y, paint);
                 y += 80;
                 paint.setTextSize(48);
                 canvas.drawText("IP: " + ip, centerX, y, paint);
                 y += 60;
                 canvas.drawText("Port: " + port, centerX, y, paint);
+
+                // Show PIN only if any displayed IP comes from an untrusted interface
+                boolean showPin = false;
+                try {
+                    java.util.Enumeration<java.net.NetworkInterface> netIfs = java.net.NetworkInterface.getNetworkInterfaces();
+                    java.util.Set<String> displayIpSet = new java.util.HashSet<>();
+                    // Split comma-separated IPs produced by updateIpDisplay
+                    for (String ipStr : ip.split(",")) {
+                        displayIpSet.add(ipStr.trim());
+                    }
+                    while (netIfs.hasMoreElements()) {
+                        java.net.NetworkInterface iface = netIfs.nextElement();
+                        if (iface.isUp() && !iface.isLoopback()) {
+                            String ifaceName = iface.getName();
+                            boolean trusted = isTrustedInterface(ifaceName);
+                            java.util.Enumeration<java.net.InetAddress> addrs = iface.getInetAddresses();
+                            while (addrs.hasMoreElements()) {
+                                java.net.InetAddress addr = addrs.nextElement();
+                                if (!addr.isLoopbackAddress() && addr instanceof java.net.Inet4Address) {
+                                    if (displayIpSet.contains(addr.getHostAddress()) && !trusted) {
+                                        showPin = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (showPin) break;
+                        }
+                    }
+                } catch (Exception e) {}
+
+                if (showPin) {
                 y += 90;  // Increased gap between port and PIN
                 paint.setTextSize(72);
                 paint.setColor(android.graphics.Color.YELLOW);
                 paint.setFakeBoldText(true);
                 canvas.drawText("PIN: " + String.format("%04d", pin), centerX, y, paint);
+                }
 
                 holder.unlockCanvasAndPost(canvas);
             }
@@ -974,7 +1042,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         @SuppressWarnings("deprecation")
         android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
         return fallbackDisplay;
-    }
+                }
 
     /**
      * Get the physical size of a display as a Point.
@@ -986,7 +1054,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         size.x = mode.getPhysicalWidth();
         size.y = mode.getPhysicalHeight();
         return size;
-    }
+                }
 
     /**
      * Find an external/TV display if one exists.
