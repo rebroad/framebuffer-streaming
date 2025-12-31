@@ -116,6 +116,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        // Always clear to black on every surface creation (prevents white flash on startup/external switch)
+        android.graphics.Canvas c = null;
+        try {
+            c = holder.lockCanvas();
+            if (c != null) c.drawColor(android.graphics.Color.BLACK);
+        } finally {
+            if (c != null) holder.unlockCanvasAndPost(c);
+        }
         // Surface is recreated (e.g., app came back to foreground)
         // Update FrameReceiver with new SurfaceHolder if it exists
         if (frameReceiver != null) {
@@ -890,9 +898,17 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     private void displayConnectionInfoOnTV(int port, String ip, int pin) {
         // Draw connection info on the SurfaceView so it's visible on TV
-        SurfaceHolder holder = surfaceView.getHolder();
-        if (tvSurfaceView != null && tvSurfaceView.getHolder() != null) {
+        // Always draw on the holder for whichever SurfaceView is VISIBLE
+        SurfaceHolder holder;
+        if (tvSurfaceView != null && tvSurfaceView.getHolder() != null && tvSurfaceView.getVisibility() == android.view.View.VISIBLE) {
             holder = tvSurfaceView.getHolder();
+        } else {
+            holder = surfaceView.getHolder();
+        }
+        // Abort drawing if the target surfaceView is hidden
+        if ((surfaceView.getVisibility() != android.view.View.VISIBLE && holder == surfaceView.getHolder()) ||
+            (tvSurfaceView != null && tvSurfaceView.getVisibility() != android.view.View.VISIBLE && holder == tvSurfaceView.getHolder())) {
+            return;
         }
         android.graphics.Canvas canvas = null;
         try {
@@ -909,19 +925,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
                 // Get version string
                 String version = getString(getResources().getIdentifier("app_version", "string", getPackageName()));
-                // Get display resolution string (compatible with all APIs)
-                String resolution;
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                    android.view.WindowMetrics winMetrics = getWindowManager().getCurrentWindowMetrics();
-                    int width = winMetrics.getBounds().width();
-                    int height = winMetrics.getBounds().height();
-                    resolution = width + "x" + height;
-                } else {
-                    @SuppressWarnings("deprecation")
-                    android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
-                    ((tvSurfaceView != null) ? tvSurfaceView.getDisplay() : surfaceView.getDisplay()).getMetrics(metrics);
-                    resolution = metrics.widthPixels + "x" + metrics.heightPixels;
-                }
+                // Draw the ACTUAL canvas size as the resolution (works for both phone and TV and is always correct)
+                String resolution = canvas.getWidth() + "x" + canvas.getHeight();
 
                 // Draw version in cyan at top-left
                 paint.setColor(android.graphics.Color.CYAN);
