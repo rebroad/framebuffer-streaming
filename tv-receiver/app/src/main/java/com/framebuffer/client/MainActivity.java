@@ -909,7 +909,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
                 // Get version string
                 String version = getString(getResources().getIdentifier("app_version", "string", getPackageName()));
-                // Get display resolution string (non-deprecated way)
+                // Get display resolution string (compatible with all APIs)
                 String resolution;
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     android.view.WindowMetrics winMetrics = getWindowManager().getCurrentWindowMetrics();
@@ -917,6 +917,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     int height = winMetrics.getBounds().height();
                     resolution = width + "x" + height;
                 } else {
+                    @SuppressWarnings("deprecation")
                     android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
                     ((tvSurfaceView != null) ? tvSurfaceView.getDisplay() : surfaceView.getDisplay()).getMetrics(metrics);
                     resolution = metrics.widthPixels + "x" + metrics.heightPixels;
