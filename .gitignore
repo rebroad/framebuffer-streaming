@@ -8,6 +8,7 @@ client/local.properties
 tv-receiver/.gradle/
 tv-receiver/app/.cxx/
 tv-receiver/app/build/
+tv-receiver/.last_deploy
 tv-receiver/.idea/
 tv-receiver/local.properties
 x11-streamer/build/

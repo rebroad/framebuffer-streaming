@@ -161,21 +161,9 @@ INSTALL_START=$(date +%s.%N)
 # Build install command with optimizations:
 # -r: replace existing app (faster than uninstall + install, preserves data)
 # -t: allow test APKs (needed for debug builds)
-# --fastdeploy: use incremental install (only transfer changed parts of APK)
-# Note: Fast Deploy requires API 24+, so check device API level first
 INSTALL_CMD="adb install -r"
 if [ "$BUILD_TYPE" = "debug" ]; then
     INSTALL_CMD="$INSTALL_CMD -t"
-fi
-
-# Check device API level - Fast Deploy requires API 24+
-DEVICE_API=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' | grep -Eo '^[0-9]+' || echo "0")
-echo "[deploy.sh] Detected device API level: $DEVICE_API" >&2
-if [ -n "$DEVICE_API" ] && [ "$DEVICE_API" -ge 24 ] 2>/dev/null; then
-    echo "[deploy.sh] Using --fastdeploy (device meets API requirements)" >&2
-    INSTALL_CMD="$INSTALL_CMD --fastdeploy"
-else
-    echo "[deploy.sh] Not using --fastdeploy (device API < 24 or not detected)" >&2
 fi
 
 if $INSTALL_CMD "$APK_PATH"; then
