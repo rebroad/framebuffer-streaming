@@ -400,25 +400,13 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
     const void *frame_data = NULL;
     size_t frame_data_size = 0;
 
-    // Get frame data (need mapped data for dirty rectangle detection)
-    if (fb->map) {
-        frame_data = fb->map;
-        frame_data_size = fb->size;
-    } else if (fb->dma_fd >= 0) {
-        // For DMA-BUF, we need to map it to send pixel data over network
-        // (can't pass file descriptors over TCP/IP sockets)
-        if (drm_fb_map(fb) < 0) {
-            printf("Failed to map DMA-BUF for network transmission\n");
-            return;
-        }
-        frame_data = fb->map;
-        frame_data_size = fb->size;
-        // For DMA-BUF, we can't easily do dirty rectangle detection
-        // Fall back to full frame mode
-        encoding_mode = ENCODING_MODE_FULL_FRAME;
-    } else {
-        return;  // No data available
+    // Get frame data (framebuffer should already be mapped)
+    if (!fb->map) {
+        printf("Framebuffer not mapped\n");
+        return;
     }
+    frame_data = fb->map;
+    frame_data_size = fb->size;
 
     // Detect dirty rectangles if enabled
     dirty_rect_t dirty_rects[64];  // Max 64 rectangles
@@ -685,39 +673,12 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
         return;
     }
 
-    // For dirty rectangles and H.264, we need mapped data, so always map
-    // For full frame mode: prefer DMA-BUF for zero-copy, BUT disable it when encryption is enabled
-    // (encryption requires copying data to encrypt it, so zero-copy doesn't help)
-    if (streamer->encoding_mode == ENCODING_MODE_DIRTY_RECTS ||
-        streamer->encoding_mode == ENCODING_MODE_H264 ||
-        streamer->enable_encryption) {
-        // Always map when:
-        // 1. Dirty rectangles or H.264 encoding (need mapped data)
-        // 2. Encryption is enabled (need to copy data to encrypt it)
-        // First try to export as DMA-BUF, then map it
-        if (drm_fb_export_dma_buf(fb) < 0) {
-            // DMA-BUF export failed - try to map directly (not currently supported for non-DMA-BUF)
-            if (drm_fb_map(fb) < 0) {
-                drm_fb_close(fb);
-                return;
-            }
-        } else {
-            // DMA-BUF exported successfully, now map it
-            if (drm_fb_map(fb) < 0) {
-                drm_fb_close(fb);
-                return;
-            }
-        }
-    } else {
-        // Try to export as DMA-BUF (preferred method for full frame, unencrypted)
-        if (drm_fb_export_dma_buf(fb) < 0) {
-            // Fallback: map the framebuffer directly (for dumb buffers from Xorg/X11Libre)
-            // drm_fb_map() will try DMA-BUF mapping first, then fall back to DRM_IOCTL_MODE_MAP_DUMB
-            if (drm_fb_map(fb) < 0) {
-                drm_fb_close(fb);
-                return;
-            }
-        }
+    // Map the framebuffer for CPU access (needed for network transmission)
+    // Note: DMA-BUF zero-copy doesn't help here since we're sending over the network anyway
+    // We just need to map the framebuffer memory (whether DMA-BUF or dumb buffer) and send pixel data
+    if (drm_fb_map(fb) < 0) {
+        drm_fb_close(fb);
+        return;
     }
 
     // Send frame to TV receiver

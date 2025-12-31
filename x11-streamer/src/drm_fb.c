@@ -132,41 +132,10 @@ void drm_fb_close(drm_fb_t *fb)
 
     drm_fb_unmap(fb);
 
-    if (fb->dma_fd >= 0)
-        close(fb->dma_fd);
-
     if (fb->fd >= 0)
         close(fb->fd);
 
     free(fb);
-}
-
-int drm_fb_export_dma_buf(drm_fb_t *fb)
-{
-    if (!fb || fb->fd < 0)
-        return -1;
-
-    // Get the handle for the framebuffer
-    drmModeFBPtr fb_info = drmModeGetFB(fb->fd, fb->fb_id);
-    if (!fb_info)
-        return -1;
-
-    uint32_t handle = fb_info->handle;
-    drmModeFreeFB(fb_info);
-
-    // Export as DMA-BUF
-    struct drm_prime_handle prime_handle = {
-        .handle = handle,
-        .flags = DRM_CLOEXEC | DRM_RDWR,
-        .fd = -1
-    };
-
-    int ret = drmIoctl(fb->fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime_handle);
-    if (ret < 0)
-        return -1;
-
-    fb->dma_fd = prime_handle.fd;
-    return 0;
 }
 
 int drm_fb_map(drm_fb_t *fb)
@@ -174,22 +143,12 @@ int drm_fb_map(drm_fb_t *fb)
     if (!fb || fb->fd < 0 || fb->map)
         return -1;
 
-    // If we have a DMA-BUF FD, map it for CPU access
-    // This is needed when sending over network (can't pass FDs over TCP)
-    if (fb->dma_fd >= 0) {
-        size_t size = fb->height * fb->pitch;
-        void *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fb->dma_fd, 0);
-        if (map == MAP_FAILED) {
-            return -1;
-        }
-        fb->map = map;
-        fb->size = size;
-        return 0;
-    }
+    // Map the framebuffer for CPU access
+    // Note: DMA-BUF zero-copy doesn't help here since we're sending over the network anyway.
+    // We just need CPU-accessible memory to read pixel data from.
+    // Try mapping via DRM_IOCTL_MODE_MAP_DUMB (works for dumb buffers from Xorg/X11Libre)
 
-    // For framebuffers without DMA-BUF support (e.g., dumb buffers from Xorg/X11Libre),
-    // fall back to mapping via DRM_IOCTL_MODE_MAP_DUMB
-    // 1. Get the buffer handle from drmModeGetFB()->handle
+    // Get the buffer handle from drmModeGetFB()->handle
     drmModeFBPtr fb_info = drmModeGetFB(fb->fd, fb->fb_id);
     if (!fb_info)
         return -1;
@@ -197,7 +156,7 @@ int drm_fb_map(drm_fb_t *fb)
     uint32_t handle = fb_info->handle;
     drmModeFreeFB(fb_info);
 
-    // 2. Use DRM_IOCTL_MODE_MAP_DUMB to get a mapping offset
+    // Use DRM_IOCTL_MODE_MAP_DUMB to get a mapping offset
     struct drm_mode_map_dumb map_arg = {
         .handle = handle
     };
@@ -207,7 +166,7 @@ int drm_fb_map(drm_fb_t *fb)
         return -1;
     }
 
-    // 3. mmap() the DRM device FD with that offset
+    // mmap() the DRM device FD with that offset
     void *map = mmap(NULL, fb->size, PROT_READ, MAP_SHARED, fb->fd, map_arg.offset);
     if (map == MAP_FAILED) {
         return -1;
