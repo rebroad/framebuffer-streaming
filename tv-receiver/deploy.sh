@@ -97,6 +97,19 @@ if [ "$DEVICE_COUNT" -gt 1 ]; then
     echo ""
 fi
 
+# Check if fast-launch is possible
+LAST_DEPLOY_MARKER=".last_deploy"
+if [ "$LAUNCH_APP" = true ] && [ -f "$LAST_DEPLOY_MARKER" ]; then
+    NEWEST_SRC=$(find app/src/main -type f -newer "$LAST_DEPLOY_MARKER" 2>/dev/null | head -n 1)
+    if [ -z "$NEWEST_SRC" ]; then
+        echo -e "${YELLOW}No source or resources changed since last deploy, skipping build & install.${NC}"
+        echo -e "${GREEN}Just launching the app...${NC}"
+        adb shell am start -n "$APP_ID/$MAIN_ACTIVITY"
+        echo -e "${GREEN}App launched!${NC}"
+        exit 0
+    fi
+fi
+
 # Build APK if not install-only
 if [ "$INSTALL_ONLY" = false ]; then
     echo -e "${GREEN}Building ${BUILD_TYPE} APK...${NC}"
@@ -156,9 +169,13 @@ if [ "$BUILD_TYPE" = "debug" ]; then
 fi
 
 # Check device API level - Fast Deploy requires API 24+
-DEVICE_API=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || echo "0")
-if [ "$DEVICE_API" -ge 24 ] 2>/dev/null; then
+DEVICE_API=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' | grep -Eo '^[0-9]+' || echo "0")
+echo "[deploy.sh] Detected device API level: $DEVICE_API" >&2
+if [ -n "$DEVICE_API" ] && [ "$DEVICE_API" -ge 24 ] 2>/dev/null; then
+    echo "[deploy.sh] Using --fastdeploy (device meets API requirements)" >&2
     INSTALL_CMD="$INSTALL_CMD --fastdeploy"
+else
+    echo "[deploy.sh] Not using --fastdeploy (device API < 24 or not detected)" >&2
 fi
 
 if $INSTALL_CMD "$APK_PATH"; then
@@ -169,6 +186,8 @@ if $INSTALL_CMD "$APK_PATH"; then
     else
     echo -e "${GREEN}Installation successful!${NC}"
     fi
+    # Touch marker so later runs know deployment was up-to-date
+    touch "$LAST_DEPLOY_MARKER"
 else
     echo -e "${RED}Error: Installation failed${NC}"
     exit 1
