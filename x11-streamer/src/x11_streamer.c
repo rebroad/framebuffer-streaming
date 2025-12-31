@@ -405,6 +405,14 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
         frame_data = fb->map;
         frame_data_size = fb->size;
     } else if (fb->dma_fd >= 0) {
+        // For DMA-BUF, we need to map it to send pixel data over network
+        // (can't pass file descriptors over TCP/IP sockets)
+        if (drm_fb_map(fb) < 0) {
+            printf("Failed to map DMA-BUF for network transmission\n");
+            return;
+        }
+        frame_data = fb->map;
+        frame_data_size = fb->size;
         // For DMA-BUF, we can't easily do dirty rectangle detection
         // Fall back to full frame mode
         encoding_mode = ENCODING_MODE_FULL_FRAME;
@@ -568,34 +576,6 @@ static void streamer_send_frame_to_tv(x11_streamer_t *streamer,
                 }
             }
         }
-    } else if (fb->dma_fd >= 0) {
-        // Send DMA-BUF FD via ancillary data (full frame only)
-        // Note: Ancillary data cannot be encrypted, but this is only used for zero-copy optimization
-        // The FD itself is not sensitive data - it's just a handle
-        struct msghdr msg = {0};
-        struct iovec iov;
-        char buf[CMSG_SPACE(sizeof(int))];
-        struct cmsghdr *cmsg;
-
-        iov.iov_base = &fb->dma_fd;
-        iov.iov_len = sizeof(int);
-
-        msg.msg_iov = &iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = buf;
-        msg.msg_controllen = sizeof(buf);
-
-        cmsg = CMSG_FIRSTHDR(&msg);
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-        *(int *)CMSG_DATA(cmsg) = fb->dma_fd;
-
-        msg.msg_controllen = cmsg->cmsg_len;
-
-        if (sendmsg(streamer->tv_fd, &msg, 0) < 0) {
-            printf("Failed to send DMA-BUF FD: %s\n", strerror(errno));
-        }
     } else if (frame_data) {
         // Send mapped data (full frame)
         if (streamer_send_raw(streamer, frame_data, frame_data_size) < 0) {
@@ -714,14 +694,25 @@ static void streamer_capture_and_send_frames(x11_streamer_t *streamer)
         // Always map when:
         // 1. Dirty rectangles or H.264 encoding (need mapped data)
         // 2. Encryption is enabled (need to copy data to encrypt it)
-        if (drm_fb_map(fb) < 0) {
-            drm_fb_close(fb);
-            return;
+        // First try to export as DMA-BUF, then map it
+        if (drm_fb_export_dma_buf(fb) < 0) {
+            // DMA-BUF export failed - try to map directly (not currently supported for non-DMA-BUF)
+            if (drm_fb_map(fb) < 0) {
+                drm_fb_close(fb);
+                return;
+            }
+        } else {
+            // DMA-BUF exported successfully, now map it
+            if (drm_fb_map(fb) < 0) {
+                drm_fb_close(fb);
+                return;
+            }
         }
     } else {
         // Try to export as DMA-BUF (preferred method for full frame, unencrypted)
         if (drm_fb_export_dma_buf(fb) < 0) {
-            // Fallback: map the framebuffer
+            // Fallback: map the framebuffer directly (for dumb buffers from Xorg/X11Libre)
+            // drm_fb_map() will try DMA-BUF mapping first, then fall back to DRM_IOCTL_MODE_MAP_DUMB
             if (drm_fb_map(fb) < 0) {
                 drm_fb_close(fb);
                 return;

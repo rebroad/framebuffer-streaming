@@ -174,14 +174,47 @@ int drm_fb_map(drm_fb_t *fb)
     if (!fb || fb->fd < 0 || fb->map)
         return -1;
 
-    // For DMA-BUF, we typically don't map it directly
-    // The TV receiver will import the DMA-BUF FD
-    // But for fallback, we can try to map if it's a dumb buffer
-    // For now, return success if we have a DMA-BUF FD
-    if (fb->dma_fd >= 0)
+    // If we have a DMA-BUF FD, map it for CPU access
+    // This is needed when sending over network (can't pass FDs over TCP)
+    if (fb->dma_fd >= 0) {
+        size_t size = fb->height * fb->pitch;
+        void *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fb->dma_fd, 0);
+        if (map == MAP_FAILED) {
+            return -1;
+        }
+        fb->map = map;
+        fb->size = size;
         return 0;
+    }
 
-    return -1;
+    // For framebuffers without DMA-BUF support (e.g., dumb buffers from Xorg/X11Libre),
+    // fall back to mapping via DRM_IOCTL_MODE_MAP_DUMB
+    // 1. Get the buffer handle from drmModeGetFB()->handle
+    drmModeFBPtr fb_info = drmModeGetFB(fb->fd, fb->fb_id);
+    if (!fb_info)
+        return -1;
+
+    uint32_t handle = fb_info->handle;
+    drmModeFreeFB(fb_info);
+
+    // 2. Use DRM_IOCTL_MODE_MAP_DUMB to get a mapping offset
+    struct drm_mode_map_dumb map_arg = {
+        .handle = handle
+    };
+
+    if (drmIoctl(fb->fd, DRM_IOCTL_MODE_MAP_DUMB, &map_arg) < 0) {
+        // Not a dumb buffer or mapping failed
+        return -1;
+    }
+
+    // 3. mmap() the DRM device FD with that offset
+    void *map = mmap(NULL, fb->size, PROT_READ, MAP_SHARED, fb->fd, map_arg.offset);
+    if (map == MAP_FAILED) {
+        return -1;
+    }
+
+    fb->map = map;
+    return 0;
 }
 
 void drm_fb_unmap(drm_fb_t *fb)
