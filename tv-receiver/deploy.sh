@@ -139,14 +139,36 @@ else
     echo -e "${GREEN}Using existing APK: $APK_PATH${NC}"
 fi
 
-# Uninstall existing app (optional, but helps avoid conflicts)
-echo -e "${YELLOW}Uninstalling existing app (if present)...${NC}"
-adb uninstall "$APP_ID" 2>/dev/null || true
-
-# Install APK
+# Install APK with timing
+# Note: Using -r (replace) replaces the app without uninstalling first, which is faster
+# and preserves app data. No need to uninstall separately.
 echo -e "${GREEN}Installing APK...${NC}"
-if adb install -r "$APK_PATH"; then
+INSTALL_START=$(date +%s.%N)
+
+# Build install command with optimizations:
+# -r: replace existing app (faster than uninstall + install, preserves data)
+# -t: allow test APKs (needed for debug builds)
+# --fastdeploy: use incremental install (only transfer changed parts of APK)
+# Note: Fast Deploy requires API 24+, so check device API level first
+INSTALL_CMD="adb install -r"
+if [ "$BUILD_TYPE" = "debug" ]; then
+    INSTALL_CMD="$INSTALL_CMD -t"
+fi
+
+# Check device API level - Fast Deploy requires API 24+
+DEVICE_API=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || echo "0")
+if [ "$DEVICE_API" -ge 24 ] 2>/dev/null; then
+    INSTALL_CMD="$INSTALL_CMD --fastdeploy"
+fi
+
+if $INSTALL_CMD "$APK_PATH"; then
+    INSTALL_END=$(date +%s.%N)
+    INSTALL_TIME=$(echo "$INSTALL_END - $INSTALL_START" | bc 2>/dev/null || echo "0")
+    if [ -n "$INSTALL_TIME" ] && [ "$(echo "$INSTALL_TIME > 0" | bc 2>/dev/null)" = "1" ]; then
+        printf "${GREEN}Installation successful! (%.2fs)${NC}\n" "$INSTALL_TIME"
+    else
     echo -e "${GREEN}Installation successful!${NC}"
+    fi
 else
     echo -e "${RED}Error: Installation failed${NC}"
     exit 1

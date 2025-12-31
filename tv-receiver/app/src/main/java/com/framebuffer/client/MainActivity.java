@@ -34,6 +34,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     private int tcpPort;  // TCP port for connections
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private Handler continuousIpUpdateHandler;
+    private Runnable continuousIpUpdateRunnable;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -77,12 +79,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             @Override
             public void onAvailable(Network network) {
                 android.util.Log.i("MainActivity", "Network available: " + network);
+                // Update immediately - continuous polling will catch any delayed changes
                 updateIpDisplay();
             }
 
             @Override
             public void onLost(Network network) {
                 android.util.Log.i("MainActivity", "Network lost: " + network);
+                // Update immediately - continuous polling will catch any delayed changes
                 updateIpDisplay();
             }
 
@@ -91,9 +95,20 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 android.util.Log.i("MainActivity", "Network capabilities changed: " + network);
                 updateIpDisplay();
             }
+
+            @Override
+            public void onLinkPropertiesChanged(Network network, android.net.LinkProperties linkProperties) {
+                android.util.Log.i("MainActivity", "Network link properties changed: " + network);
+                // This fires when IP addresses are assigned or removed, so update immediately
+                updateIpDisplay();
+            }
         };
         NetworkRequest request = new NetworkRequest.Builder().build();
         connectivityManager.registerNetworkCallback(request, networkCallback);
+
+        // Start continuous IP polling to catch USB tethering changes
+        // USB tethering interfaces may not always trigger NetworkCallback properly
+        startContinuousIpUpdate();
 
         // Automatically start listening when app opens
         startListening();
@@ -272,7 +287,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         // Query display capabilities - use TV if connected, otherwise phone display
                         android.view.Display targetDisplay = getTargetDisplay();
                         android.graphics.Point size = new android.graphics.Point();
-                        targetDisplay.getRealSize(size);
+                        // Use getMode() for physical dimensions (modern API, available from API 23+)
+                        android.view.Display.Mode mode = targetDisplay.getMode();
+                        size.x = mode.getPhysicalWidth();
+                        size.y = mode.getPhysicalHeight();
 
                         // Get refresh rate from target display
                         float refreshRate = targetDisplay.getRefreshRate();
@@ -802,6 +820,39 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         return ipList;
     }
 
+    // Start continuous IP polling (runs every 2 seconds while listening)
+    // This catches USB tethering changes that NetworkCallback might miss
+    private void startContinuousIpUpdate() {
+        if (continuousIpUpdateHandler == null) {
+            continuousIpUpdateHandler = new Handler(Looper.getMainLooper());
+        }
+
+        // Stop any existing continuous updates
+        stopContinuousIpUpdate();
+
+        continuousIpUpdateRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (listening) {
+                    updateIpDisplay();
+                    // Poll every 2 seconds continuously
+                    continuousIpUpdateHandler.postDelayed(this, 2000);
+                }
+            }
+        };
+
+        // Start polling after a short delay
+        continuousIpUpdateHandler.postDelayed(continuousIpUpdateRunnable, 2000);
+    }
+
+    // Stop continuous IP updates
+    private void stopContinuousIpUpdate() {
+        if (continuousIpUpdateHandler != null && continuousIpUpdateRunnable != null) {
+            continuousIpUpdateHandler.removeCallbacks(continuousIpUpdateRunnable);
+            continuousIpUpdateRunnable = null;
+        }
+    }
+
     // Update IP display when network interfaces change
     private void updateIpDisplay() {
         if (!listening) return;
@@ -880,6 +931,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     @Override
     protected void onDestroy() {
+        // Stop continuous IP updates
+        stopContinuousIpUpdate();
+
         // Unregister network callback
         if (connectivityManager != null && networkCallback != null) {
             connectivityManager.unregisterNetworkCallback(networkCallback);
@@ -904,7 +958,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         if (displayManager == null) {
             return false;
         }
-        android.view.Display defaultDisplay = getWindowManager().getDefaultDisplay();
+        android.view.Display defaultDisplay = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+        if (defaultDisplay == null) {
+            return false;
+        }
         int defaultDisplayId = defaultDisplay.getDisplayId();
 
         android.view.Display[] displays = displayManager.getDisplays();
@@ -919,10 +976,15 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // Also check if it's HDMI or other external connection
                 // (HDMI displays typically have different characteristics)
                 android.graphics.Point size = new android.graphics.Point();
-                display.getRealSize(size);
+                // Use getMode() for physical dimensions (modern API, available from API 23+)
+                android.view.Display.Mode mode = display.getMode();
+                size.x = mode.getPhysicalWidth();
+                size.y = mode.getPhysicalHeight();
                 // If it's a different size or has presentation flag, it's likely external
                 android.graphics.Point defaultSize = new android.graphics.Point();
-                defaultDisplay.getRealSize(defaultSize);
+                android.view.Display.Mode defaultMode = defaultDisplay.getMode();
+                defaultSize.x = defaultMode.getPhysicalWidth();
+                defaultSize.y = defaultMode.getPhysicalHeight();
                 if (!size.equals(defaultSize)) {
                     return true;
                 }
@@ -933,10 +995,23 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     private android.view.Display getTargetDisplay() {
         if (displayManager == null) {
-            return getWindowManager().getDefaultDisplay();
+            // Fallback if displayManager is not available - use Context.getDisplay() (API 30+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                android.view.Display display = getDisplay();
+                if (display != null) {
+                    return display;
+                }
+            }
+            // Last resort: use deprecated API (should not happen in practice)
+            @SuppressWarnings("deprecation")
+            android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
+            return fallbackDisplay;
         }
 
-        android.view.Display defaultDisplay = getWindowManager().getDefaultDisplay();
+        android.view.Display defaultDisplay = displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+        if (defaultDisplay == null) {
+            return null;
+        }
         int defaultDisplayId = defaultDisplay.getDisplayId();
 
         android.view.Display[] displays = displayManager.getDisplays();
@@ -950,9 +1025,14 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 }
                 // Also check if it's HDMI or other external connection
                 android.graphics.Point size = new android.graphics.Point();
-                display.getRealSize(size);
+                // Use getMode() for physical dimensions (modern API, available from API 23+)
+                android.view.Display.Mode mode = display.getMode();
+                size.x = mode.getPhysicalWidth();
+                size.y = mode.getPhysicalHeight();
                 android.graphics.Point defaultSize = new android.graphics.Point();
-                defaultDisplay.getRealSize(defaultSize);
+                android.view.Display.Mode defaultMode = defaultDisplay.getMode();
+                defaultSize.x = defaultMode.getPhysicalWidth();
+                defaultSize.y = defaultMode.getPhysicalHeight();
                 if (!size.equals(defaultSize)) {
                     return display;
                 }
@@ -967,7 +1047,21 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         boolean tvConnected = isTvConnected();
         android.view.Display tvDisplay = getTargetDisplay();
 
-        if (tvConnected && tvDisplay != null && tvDisplay.getDisplayId() != getWindowManager().getDefaultDisplay().getDisplayId()) {
+        android.view.Display defaultDisplay = displayManager != null ?
+            displayManager.getDisplay(android.view.Display.DEFAULT_DISPLAY) : null;
+        if (defaultDisplay == null) {
+            // Fallback if DisplayManager fails - use Context.getDisplay() (API 30+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                defaultDisplay = getDisplay();
+            }
+            if (defaultDisplay == null) {
+                // Last resort: use deprecated API (should not happen in practice)
+                @SuppressWarnings("deprecation")
+                android.view.Display fallbackDisplay = getWindowManager().getDefaultDisplay();
+                defaultDisplay = fallbackDisplay;
+            }
+        }
+        if (tvConnected && tvDisplay != null && defaultDisplay != null && tvDisplay.getDisplayId() != defaultDisplay.getDisplayId()) {
             // TV is connected - create Presentation on TV display
             if (tvPresentation == null) {
                 tvPresentation = new TvPresentation(this, tvDisplay);
