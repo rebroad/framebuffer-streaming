@@ -244,6 +244,20 @@ output_info_t *x11_context_find_output(x11_context_t *ctx, RROutput output_id)
     return NULL;
 }
 
+output_info_t *x11_context_get_primary_output(x11_context_t *ctx)
+{
+    if (!ctx || !ctx->display || !ctx->screen_resources)
+        return NULL;
+
+    // Get the primary output
+    RROutput primary_output = XRRGetOutputPrimary(ctx->display, ctx->root);
+    if (primary_output == None)
+        return NULL;
+
+    // Find it in our outputs list
+    return x11_context_find_output(ctx, primary_output);
+}
+
 void x11_context_free_outputs(x11_context_t *ctx)
 {
     if (!ctx || !ctx->outputs)

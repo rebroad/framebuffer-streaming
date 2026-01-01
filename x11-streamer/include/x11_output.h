@@ -37,6 +37,7 @@ x11_context_t *x11_context_create(void);
 void x11_context_destroy(x11_context_t *ctx);
 int x11_context_refresh_outputs(x11_context_t *ctx);
 output_info_t *x11_context_find_output(x11_context_t *ctx, RROutput output_id);
+output_info_t *x11_context_get_primary_output(x11_context_t *ctx);
 void x11_context_free_outputs(x11_context_t *ctx);
 RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
                                             int width, int height, int refresh);

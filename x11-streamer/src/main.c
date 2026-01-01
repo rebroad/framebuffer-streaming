@@ -30,6 +30,8 @@ static void print_usage(const char *prog_name)
     fprintf(stderr, "  --crypt              Force encryption for session (overrides autodetect)\n");
     fprintf(stderr, "  --nocrypt            Disable encryption for session (overrides autodetect)\n");
     fprintf(stderr, "  --pin PIN            PIN code (4 digits, avoids prompt)\n");
+    fprintf(stderr, "  --mirror             Mirror primary display (clone primary display)\n");
+    fprintf(stderr, "  --extend             Extend desktop (create new virtual display, default)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Examples:\n");
     fprintf(stderr, "  %s                           # Broadcast discovery on port %d\n", prog_name, DEFAULT_TV_PORT);
@@ -40,7 +42,7 @@ static void print_usage(const char *prog_name)
 
 int main(int argc, char *argv[])
 {
-    streamer_discovery_options_t options = {
+    x11_streamer_options_t options = {
         .use_broadcast = true,  // Default: use broadcast
         .host = NULL,
         .port = DEFAULT_TV_PORT,
@@ -48,7 +50,8 @@ int main(int argc, char *argv[])
         .program_name = argv[0],  // Pass program name for error messages
         .force_encrypt = false,
         .force_no_encrypt = false,
-        .pin = 0xFFFF  // No PIN provided by default (0xFFFF = sentinel, valid PINs are 0-9999)
+        .pin = 0xFFFF,  // No PIN provided by default (0xFFFF = sentinel, valid PINs are 0-9999)
+        .display_mode = STREAMER_DISPLAY_MODE_EXTEND  // Default: extend desktop
     };
     // Parse command-line arguments
     for (int i = 1; i < argc; i++) {
@@ -93,6 +96,10 @@ int main(int argc, char *argv[])
                 return 1;
             }
             options.pin = (uint16_t)pin_val;
+        } else if (strcmp(argv[i], "--mirror") == 0) {
+            options.display_mode = STREAMER_DISPLAY_MODE_MIRROR;
+        } else if (strcmp(argv[i], "--extend") == 0) {
+            options.display_mode = STREAMER_DISPLAY_MODE_EXTEND;
         } else if (argv[i][0] != '-') {
             // Positional argument: HOST:PORT or HOST
             char *host_port = argv[i];

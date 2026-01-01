@@ -42,6 +42,7 @@ struct x11_streamer {
     bool force_encrypt;
     bool force_no_encrypt;
     uint16_t pin;  // PIN from command line (0 if not provided)
+    streamer_display_mode_t display_mode;  // Display mode: extend or mirror
     int tv_fd;  // Connection to TV receiver
     char *tv_host;
     int tv_port;
@@ -168,9 +169,9 @@ static void *tv_receiver_thread(void *arg)
         }
     }
 
+    char *display_name = NULL;  // Declare outside block for cleanup
     if (payload && header.length >= sizeof(hello_message_t)) {
         hello_message_t *hello_msg = (hello_message_t *)payload;
-        char *display_name = NULL;
         display_mode_t *modes = NULL;
 
         // Convert from network byte order
@@ -224,92 +225,138 @@ static void *tv_receiver_thread(void *arg)
             snprintf(tv_display_name, sizeof(tv_display_name), "TV Display");
         }
 
-        // Create virtual output using the TV's display name
+        // Handle display setup based on mode
         RROutput virtual_output_id = None;
-        if (modes && hello_msg->num_modes > 0) {
-            // Use the first/preferred mode to create virtual output
-            display_mode_t *preferred_mode = &modes[0];
+        output_info_t *primary_output = NULL;
 
-            // Create virtual output with the exact display name (no "XR-" prefix)
-            virtual_output_id = x11_context_create_virtual_output(
-                streamer->x11_ctx,
-                tv_display_name,  // Use display name directly
-                preferred_mode->width,
-                preferred_mode->height,
-                preferred_mode->refresh_rate / 100  // Convert from Hz*100 to Hz
-            );
-
-            if (virtual_output_id != None) {
-                int refresh_rate = preferred_mode->refresh_rate / 100;
-                // Refresh outputs to get the new virtual output
-                x11_context_refresh_outputs(streamer->x11_ctx);
-
-                // Find and print the TV receiver's virtual output
-                output_info_t *tv_output = NULL;
-                for (int i = 0; i < streamer->x11_ctx->num_outputs; i++) {
-                    if (streamer->x11_ctx->outputs[i].output_id == virtual_output_id) {
-                        tv_output = &streamer->x11_ctx->outputs[i];
-                        break;
-                    }
+        if (streamer->display_mode == STREAMER_DISPLAY_MODE_MIRROR) {
+            // Mirror mode: use primary display directly (no virtual output needed)
+            primary_output = x11_context_get_primary_output(streamer->x11_ctx);
+            if (!primary_output) {
+                fprintf(stderr, "Error: Could not find primary display for mirroring\n");
+                // Free and continue to cleanup
+                if (display_name && display_name != (char *)payload + sizeof(hello_message_t)) {
+                    free(display_name);
                 }
+                free(payload);
+                return NULL;
+            }
 
-                if (tv_output) {
-                    printf("TV receiver virtual output: '%s' %dx%d@%dHz",
-                           tv_output->name ? tv_output->name : tv_display_name,
-                           tv_output->width, tv_output->height, refresh_rate);
-                    if (hello_msg->num_modes > 1) {
-                        printf(" (%d modes available)", hello_msg->num_modes);
-                    }
-                    printf("\n");
-                } else {
-                    printf("Created virtual output: '%s' (%dx%d@%dHz)\n",
-                           tv_display_name, preferred_mode->width,
-                           preferred_mode->height, refresh_rate);
+            if (!primary_output->connected || primary_output->framebuffer_id == 0) {
+                fprintf(stderr, "Error: Primary display '%s' is not connected or has no framebuffer\n",
+                       primary_output->name ? primary_output->name : "unknown");
+                // Free and continue to cleanup
+                if (display_name && display_name != (char *)payload + sizeof(hello_message_t)) {
+                    free(display_name);
                 }
+                free(payload);
+                return NULL;
+            }
 
-                // Set all modes from TV receiver (not just the first one)
-                if (hello_msg->num_modes > 1) {
-                    int *widths = malloc(hello_msg->num_modes * sizeof(int));
-                    int *heights = malloc(hello_msg->num_modes * sizeof(int));
-                    int *refresh_rates = malloc(hello_msg->num_modes * sizeof(int));
+            printf("Mirroring primary display '%s' (%dx%d@%dHz) - no virtual output needed\n",
+                   primary_output->name ? primary_output->name : "unknown",
+                   primary_output->width, primary_output->height, primary_output->refresh_rate);
 
-                    if (widths && heights && refresh_rates) {
-                        for (int i = 0; i < hello_msg->num_modes; i++) {
-                            widths[i] = modes[i].width;
-                            heights[i] = modes[i].height;
-                            refresh_rates[i] = modes[i].refresh_rate / 100;  // Convert from Hz*100 to Hz
+            // Store primary output ID for frame capture
+            pthread_mutex_lock(&streamer->tv_mutex);
+            if (streamer->tv_conn) {
+                streamer->tv_conn->virtual_output_id = primary_output->output_id;  // Reuse field for primary output ID
+                strncpy(streamer->tv_conn->display_name, tv_display_name,
+                       sizeof(streamer->tv_conn->display_name) - 1);
+                streamer->tv_conn->display_name[sizeof(streamer->tv_conn->display_name) - 1] = '\0';
+            }
+            streamer->refresh_rate_hz = primary_output->refresh_rate;
+            streamer->last_frame_time_us = 0;
+            pthread_mutex_unlock(&streamer->tv_mutex);
+        } else {
+            // Extend mode: create virtual output
+            if (modes && hello_msg->num_modes > 0) {
+                display_mode_t *preferred_mode = &modes[0];
+                int output_width = preferred_mode->width;
+                int output_height = preferred_mode->height;
+                int output_refresh = preferred_mode->refresh_rate / 100;  // Convert from Hz*100 to Hz
+
+                // Create virtual output with the exact display name (no "XR-" prefix)
+                virtual_output_id = x11_context_create_virtual_output(
+                    streamer->x11_ctx,
+                    tv_display_name,  // Use display name directly
+                    output_width,
+                    output_height,
+                    output_refresh
+                );
+
+                if (virtual_output_id != None) {
+                    int refresh_rate = output_refresh;
+
+                    // Find and print the TV receiver's virtual output
+                    output_info_t *tv_output = NULL;
+                    for (int i = 0; i < streamer->x11_ctx->num_outputs; i++) {
+                        if (streamer->x11_ctx->outputs[i].output_id == virtual_output_id) {
+                            tv_output = &streamer->x11_ctx->outputs[i];
+                            break;
                         }
-
-                        x11_context_set_virtual_output_modes(streamer->x11_ctx, virtual_output_id,
-                                                            widths, heights, refresh_rates,
-                                                            hello_msg->num_modes);
-                        printf("Set %d modes for virtual output '%s'\n",
-                               hello_msg->num_modes, tv_display_name);
-
-                        free(widths);
-                        free(heights);
-                        free(refresh_rates);
                     }
-                }
 
-                pthread_mutex_lock(&streamer->tv_mutex);
-                if (streamer->tv_conn) {
-                    streamer->tv_conn->virtual_output_id = virtual_output_id;
-                    strncpy(streamer->tv_conn->display_name, tv_display_name,
-                           sizeof(streamer->tv_conn->display_name) - 1);
-                    streamer->tv_conn->display_name[sizeof(streamer->tv_conn->display_name) - 1] = '\0';
+                    if (tv_output) {
+                        printf("TV receiver virtual output: '%s' %dx%d@%dHz",
+                               tv_output->name ? tv_output->name : tv_display_name,
+                               tv_output->width, tv_output->height, refresh_rate);
+                        if (hello_msg->num_modes > 1) {
+                            printf(" (%d modes available)", hello_msg->num_modes);
+                        }
+                        printf("\n");
+                    } else {
+                        printf("Created virtual output: '%s' (%dx%d@%dHz)\n",
+                               tv_display_name, output_width, output_height, refresh_rate);
+                    }
+
+                    // Set all modes from TV receiver (not just the first one)
+                    if (hello_msg->num_modes > 1) {
+                        int *widths = malloc(hello_msg->num_modes * sizeof(int));
+                        int *heights = malloc(hello_msg->num_modes * sizeof(int));
+                        int *refresh_rates = malloc(hello_msg->num_modes * sizeof(int));
+
+                        if (widths && heights && refresh_rates) {
+                            for (int i = 0; i < hello_msg->num_modes; i++) {
+                                widths[i] = modes[i].width;
+                                heights[i] = modes[i].height;
+                                refresh_rates[i] = modes[i].refresh_rate / 100;  // Convert from Hz*100 to Hz
+                            }
+
+                            x11_context_set_virtual_output_modes(streamer->x11_ctx, virtual_output_id,
+                                                                widths, heights, refresh_rates,
+                                                                hello_msg->num_modes);
+                            printf("Set %d modes for virtual output '%s'\n",
+                                   hello_msg->num_modes, tv_display_name);
+
+                            free(widths);
+                            free(heights);
+                            free(refresh_rates);
+                        }
+                    }
+
+                    pthread_mutex_lock(&streamer->tv_mutex);
+                    if (streamer->tv_conn) {
+                        streamer->tv_conn->virtual_output_id = virtual_output_id;
+                        strncpy(streamer->tv_conn->display_name, tv_display_name,
+                               sizeof(streamer->tv_conn->display_name) - 1);
+                        streamer->tv_conn->display_name[sizeof(streamer->tv_conn->display_name) - 1] = '\0';
+                    }
+                    streamer->refresh_rate_hz = refresh_rate;
+                    streamer->last_frame_time_us = 0;
+                    pthread_mutex_unlock(&streamer->tv_mutex);
+                } else {
+                    printf("Failed to create virtual output for TV receiver\n");
                 }
-                streamer->refresh_rate_hz = refresh_rate;
-                streamer->last_frame_time_us = 0;
-                pthread_mutex_unlock(&streamer->tv_mutex);
             } else {
-                printf("Failed to create virtual output for TV receiver\n");
+                fprintf(stderr, "Error: TV receiver sent no display modes\n");
             }
         }
 
         // Free display name if we allocated it
         if (display_name && display_name != (char *)payload + sizeof(hello_message_t)) {
             free(display_name);
+            display_name = NULL;
         }
 
         free(payload);
@@ -789,14 +836,14 @@ static void streamer_check_and_notify_output_changes(x11_streamer_t *streamer)
     }
 }
 
-x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
+x11_streamer_t *x11_streamer_create(const x11_streamer_options_t *options)
 {
     x11_streamer_t *streamer = calloc(1, sizeof(x11_streamer_t));
     if (!streamer)
         return NULL;
 
     // Set defaults if options not provided
-    streamer_discovery_options_t opts;
+    x11_streamer_options_t opts;
     if (options) {
         opts = *options;
     } else {
@@ -820,6 +867,7 @@ x11_streamer_t *x11_streamer_create(const streamer_discovery_options_t *options)
     streamer->force_encrypt = opts.force_encrypt;
     streamer->force_no_encrypt = opts.force_no_encrypt;
     streamer->pin = opts.pin;
+    streamer->display_mode = opts.display_mode;
     // Store program name (extract basename if provided)
     if (opts.program_name) {
         const char *basename = strrchr(opts.program_name, '/');
