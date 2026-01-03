@@ -39,6 +39,7 @@ int x11_context_refresh_outputs(x11_context_t *ctx);
 output_info_t *x11_context_find_output(x11_context_t *ctx, RROutput output_id);
 output_info_t *x11_context_get_primary_output(x11_context_t *ctx);
 void x11_context_free_outputs(x11_context_t *ctx);
+void x11_context_keep_alive_output(x11_context_t *ctx, RROutput output_id);  // Keep-alive signal for virtual output
 RROutput x11_context_create_virtual_output(x11_context_t *ctx, const char *name,
                                             int width, int height, int refresh);
 void x11_context_set_virtual_output_modes(x11_context_t *ctx, RROutput output_id,

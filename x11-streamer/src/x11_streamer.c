@@ -54,6 +54,7 @@ struct x11_streamer {
     tv_connection_t *tv_conn;  // Single TV connection
     pthread_mutex_t tv_mutex;
     pthread_t tv_thread;
+    pthread_t keepalive_thread;  // Separate thread for keep-alive (non-blocking)
     audio_capture_t *audio_capture;
     int refresh_rate_hz;  // Display refresh rate for frame throttling
     uint64_t last_frame_time_us;  // Last frame capture time (microseconds)
@@ -115,6 +116,33 @@ static inline int streamer_send_raw(x11_streamer_t *streamer, const void *data, 
     } else {
         return send(streamer->tv_fd, data, data_len, MSG_NOSIGNAL) == (ssize_t)data_len ? 0 : -1;
     }
+}
+
+// Keep-alive thread function (runs independently, doesn't block frame capture)
+// This ensures keep-alive queries don't interrupt 120Hz frame capture timing
+static void *keepalive_thread_func(void *arg) {
+    x11_streamer_t *streamer = (x11_streamer_t *)arg;
+    while (streamer->running) {
+        // Sleep for 1 second
+        struct timespec sleep_time = { .tv_sec = 1, .tv_nsec = 0 };
+        nanosleep(&sleep_time, NULL);
+
+        if (!streamer->running)
+            break;
+
+        // Get virtual output ID (with mutex protection)
+        pthread_mutex_lock(&streamer->tv_mutex);
+        RROutput virtual_output_id = (streamer->tv_conn && streamer->tv_conn->virtual_output_id != None)
+                                  ? streamer->tv_conn->virtual_output_id : None;
+        pthread_mutex_unlock(&streamer->tv_mutex);
+
+        // Send keep-alive signal (can block here - we're in a separate thread)
+        // This won't affect frame capture timing since it's in a separate thread
+        if (virtual_output_id != None && streamer->x11_ctx) {
+            x11_context_keep_alive_output(streamer->x11_ctx, virtual_output_id);
+        }
+    }
+    return NULL;
 }
 
 static void *tv_receiver_thread(void *arg)
@@ -1766,6 +1794,11 @@ int x11_streamer_run(x11_streamer_t *streamer)
     // Get X11 display file descriptor for polling
     int x11_fd = x11_context_get_fd(streamer->x11_ctx);
 
+    // Start keep-alive thread (runs independently, doesn't block frame capture)
+    if (pthread_create(&streamer->keepalive_thread, NULL, keepalive_thread_func, streamer) != 0) {
+        printf("Warning: Failed to create keep-alive thread\n");
+    }
+
     // Main streamer loop
     while (streamer->running) {
         struct pollfd pfds[1];
@@ -1840,7 +1873,10 @@ int x11_streamer_run(x11_streamer_t *streamer)
 
 void x11_streamer_stop(x11_streamer_t *streamer)
 {
-    if (streamer)
+    if (streamer) {
         streamer->running = false;
+        // Wait for keep-alive thread to finish
+        pthread_join(streamer->keepalive_thread, NULL);
+    }
 }
 

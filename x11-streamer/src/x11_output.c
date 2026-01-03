@@ -96,6 +96,31 @@ static bool get_output_property(Display *display, RROutput output,
     return true;
 }
 
+/* Keep-alive function: Query FRAMEBUFFER_ID property to signal active consumption */
+/* This resets the inactivity timer in the X server, keeping the virtual output active */
+/* Uses existing Display connection - X11 property queries are synchronous but very fast (microseconds) */
+void x11_context_keep_alive_output(x11_context_t *ctx, RROutput output_id)
+{
+    if (!ctx || !ctx->display || output_id == None)
+        return;
+
+    // Flush any pending events first (non-blocking check)
+    // This ensures we don't accumulate events that could cause delays
+    if (XPending(ctx->display) > 0) {
+        // Process pending events quickly (non-blocking)
+        while (XPending(ctx->display) > 0) {
+            XEvent ev;
+            XNextEvent(ctx->display, &ev);
+        }
+    }
+
+    // Query FRAMEBUFFER_ID property as a lightweight keep-alive signal
+    // This is a synchronous X11 call, but it's very fast (typically <100 microseconds)
+    // since the property is already in the server's memory and we're using an existing connection
+    uint32_t dummy;
+    get_output_property(ctx->display, output_id, "FRAMEBUFFER_ID", &dummy);
+}
+
 int x11_context_refresh_outputs(x11_context_t *ctx)
 {
     if (!ctx || !ctx->display)
